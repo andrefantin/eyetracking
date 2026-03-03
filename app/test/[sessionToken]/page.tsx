@@ -35,6 +35,17 @@ function pointDistance(aX: number, aY: number, bX: number, bY: number): number {
   return Math.sqrt(dx * dx + dy * dy);
 }
 
+function getBrowserHint(): string {
+  const ua = navigator.userAgent.toLowerCase();
+  if (ua.includes("safari") && !ua.includes("chrome")) {
+    return "Safari has limited support for webcam gaze tracking. Use latest Chrome for best results.";
+  }
+  if (ua.includes("firefox")) {
+    return "Firefox support can be unstable for WebGazer. Use latest Chrome for best results.";
+  }
+  return "Ensure camera permission is allowed for this site and retry.";
+}
+
 export default function TestRunnerPage({ params }: PageProps) {
   const { sessionToken } = params;
   const searchParams = useSearchParams();
@@ -126,13 +137,14 @@ export default function TestRunnerPage({ params }: PageProps) {
 
       engineRef.current.setListener(handleGaze);
       await engineRef.current.start();
-    } catch {
+    } catch (err) {
       const fallback = createPointerFallbackEngine();
       fallback.setListener(handleGaze);
       await fallback.start();
       engineRef.current = fallback;
       setEngineName(fallback.getEngineName());
-      setError("Webcam eye tracker could not start. Running in pointer fallback mode.");
+      const reason = err instanceof Error && err.message ? err.message : "unknown initialization error";
+      setError(`Webcam eye tracker could not start (${reason}). Running in pointer fallback mode. ${getBrowserHint()}`);
     }
   };
 
