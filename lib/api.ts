@@ -38,3 +38,33 @@ export async function completeSession(sessionToken: string): Promise<void> {
     throw new Error(`Session complete failed (${response.status})`);
   }
 }
+
+export type EmailReportRequest = {
+  sessionToken: string;
+  participantName?: string;
+  figmaUrl: string;
+  summary: {
+    totalSamples: number;
+    avgConfidence: number;
+    durationSec: number;
+    topScreens: Array<{ screenId: string; samples: number }>;
+  };
+  heatmapPngDataUrl?: string;
+  heatmapJpgDataUrl?: string;
+};
+
+export async function emailSessionReport(payload: EmailReportRequest): Promise<{ status: string }> {
+  const apiBaseUrl = getApiBaseUrl();
+  const response = await fetch(`${apiBaseUrl}/api/v1/reports/email`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Email report failed (${response.status}): ${body}`);
+  }
+
+  return response.json() as Promise<{ status: string }>;
+}

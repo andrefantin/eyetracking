@@ -17,6 +17,7 @@ This is a Next.js app you can deploy directly to Vercel.
 - Built-in mock API routes for server deployment:
   - `POST /api/v1/sessions/:sessionToken/events/batch`
   - `POST /api/v1/sessions/:sessionToken/complete`
+  - `POST /api/v1/reports/email`
 
 ## Local setup
 
@@ -36,6 +37,9 @@ This is a Next.js app you can deploy directly to Vercel.
 3. Framework preset should auto-detect as **Next.js**.
 4. Add env var in Vercel project settings:
    - `NEXT_PUBLIC_FIGMA_EMBED_URL` = your Figma prototype URL
+   - `RESEND_API_KEY` = your Resend API key (for report emails)
+   - `REPORT_EMAIL_TO` = `andre.goncalves@allhuman.com`
+   - `REPORT_EMAIL_FROM` = verified sender, e.g. `Eye Tracker <reports@yourdomain.com>`
 5. Deploy.
 6. Open deployed URL:
    - `https://<your-app>.vercel.app/`
@@ -67,3 +71,5 @@ You can pass setup values directly in the URL:
 - MediaPipe Face Mesh script is loaded from CDN at runtime.
 - If MediaPipe fails to initialize, the app falls back to pointer tracking so the flow still works.
 - Figma navigation events are expected through `window.postMessage` with `type: "figma_navigation"`.
+- On test end, the app generates a local heatmap overlay and allows PNG/JPG download.
+- Email sending requires Resend env vars; without them, status will show as skipped.

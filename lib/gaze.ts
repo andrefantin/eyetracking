@@ -315,7 +315,7 @@ async function createMediapipeEngine(): Promise<GazeEngine> {
   let inFlight = false;
   let videoEl: HTMLVideoElement | null = null;
   let latestRaw: RawGazeFeature | null = null;
-  let latestMapped: { x: number; y: number } | null = null;
+  const recentRawHistory: Array<{ ts: number; raw: RawGazeFeature }> = [];
   const calibrationSamples: CalibrationSample[] = [];
   let model: GazeModel | null = null;
 
@@ -329,7 +329,10 @@ async function createMediapipeEngine(): Promise<GazeEngine> {
 
     latestRaw = raw;
     const mapped = predictFromModel(model, raw);
-    latestMapped = mapped;
+    recentRawHistory.push({ ts: Date.now(), raw });
+    if (recentRawHistory.length > 240) {
+      recentRawHistory.splice(0, recentRawHistory.length - 240);
+    }
 
     if (listener) {
       listener({
@@ -398,25 +401,43 @@ async function createMediapipeEngine(): Promise<GazeEngine> {
     recordCalibrationPoint(targetX: number, targetY: number) {
       if (!latestRaw) return null;
 
-      calibrationSamples.push({
-        rawX: latestRaw.x,
-        rawY: latestRaw.y,
-        targetX,
-        targetY
-      });
+      const now = Date.now();
+      const windowedRaw = recentRawHistory.filter((entry) => now - entry.ts <= 700).slice(-25);
+      const calibrationWindow = windowedRaw.length > 0 ? windowedRaw : [{ ts: now, raw: latestRaw }];
+
+      for (const sample of calibrationWindow) {
+        calibrationSamples.push({
+          rawX: sample.raw.x,
+          rawY: sample.raw.y,
+          targetX,
+          targetY
+        });
+      }
 
       const fitted = fitCalibrationModel(calibrationSamples);
       if (fitted) {
         model = fitted;
       }
 
-      const estimate = latestMapped ?? predictFromModel(model, latestRaw);
+      const mappedWindow = calibrationWindow.map((sample) => predictFromModel(model, sample.raw));
+      const sum = mappedWindow.reduce(
+        (acc, point) => {
+          acc.x += point.x;
+          acc.y += point.y;
+          return acc;
+        },
+        { x: 0, y: 0 }
+      );
+      const estimate = {
+        x: sum.x / mappedWindow.length,
+        y: sum.y / mappedWindow.length
+      };
       const errorPx = distance(estimate.x, estimate.y, targetX, targetY);
 
       return {
         targetX,
         targetY,
-        sampleCount: calibrationSamples.length,
+        sampleCount: calibrationWindow.length,
         avgX: estimate.x,
         avgY: estimate.y,
         errorPx,

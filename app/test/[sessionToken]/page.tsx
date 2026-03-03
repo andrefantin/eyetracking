@@ -6,7 +6,7 @@ import { useSearchParams } from "next/navigation";
 import CalibrationLayer from "@/components/CalibrationLayer";
 import CameraPermissionCard from "@/components/CameraPermissionCard";
 import GazeOverlay from "@/components/GazeOverlay";
-import { completeSession, postEventsBatch } from "@/lib/api";
+import { completeSession, emailSessionReport, postEventsBatch, type EmailReportRequest } from "@/lib/api";
 import { CALIBRATION_POINTS } from "@/lib/calibration";
 import {
   createGazeEngine,
@@ -31,6 +31,19 @@ type SessionReport = {
   topScreens: Array<{ screenId: string; samples: number }>;
 };
 
+type ReportSample = {
+  ts: number;
+  confidence: number;
+  screenId: string;
+  x: number;
+  y: number;
+  inFrame: boolean;
+  frameNX?: number;
+  frameNY?: number;
+};
+
+type EmailStatus = "idle" | "sending" | "sent" | "skipped" | "error";
+
 const BATCH_INTERVAL_MS = 750;
 const BATCH_MAX_EVENTS = 50;
 const FIGMA_URL_PLACEHOLDER = "https://www.figma.com/proto/your-file-id/your-prototype";
@@ -40,6 +53,76 @@ function pointDistance(aX: number, aY: number, bX: number, bY: number): number {
   const dx = aX - bX;
   const dy = aY - bY;
   return Math.sqrt(dx * dx + dy * dy);
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function heatColor(t: number): [number, number, number, number] {
+  const x = clamp(t, 0, 1);
+  if (x < 0.33) {
+    const p = x / 0.33;
+    return [0, Math.round(180 * p), 255, 0.1 + 0.25 * p];
+  }
+  if (x < 0.66) {
+    const p = (x - 0.33) / 0.33;
+    return [Math.round(255 * p), 220, Math.round(255 * (1 - p)), 0.35 + 0.3 * p];
+  }
+  const p = (x - 0.66) / 0.34;
+  return [255, Math.round(220 * (1 - p)), 0, 0.65 + 0.3 * p];
+}
+
+function buildHeatmapCanvas(width: number, height: number, samples: ReportSample[]): HTMLCanvasElement {
+  const w = Math.max(1, Math.floor(width));
+  const h = Math.max(1, Math.floor(height));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return canvas;
+
+  const accumulation = document.createElement("canvas");
+  accumulation.width = w;
+  accumulation.height = h;
+  const actx = accumulation.getContext("2d");
+  if (!actx) return canvas;
+
+  const frameSamples = samples.filter((sample) => sample.inFrame && sample.frameNX !== undefined && sample.frameNY !== undefined);
+  const radius = Math.max(28, Math.round(Math.min(w, h) * 0.05));
+
+  for (const sample of frameSamples) {
+    const x = clamp((sample.frameNX as number) * w, 0, w);
+    const y = clamp((sample.frameNY as number) * h, 0, h);
+    const gradient = actx.createRadialGradient(x, y, 0, x, y, radius);
+    const strength = clamp(0.05 + sample.confidence * 0.12, 0.04, 0.18);
+    gradient.addColorStop(0, `rgba(255,255,255,${strength})`);
+    gradient.addColorStop(1, "rgba(255,255,255,0)");
+    actx.fillStyle = gradient;
+    actx.beginPath();
+    actx.arc(x, y, radius, 0, Math.PI * 2);
+    actx.fill();
+  }
+
+  const image = actx.getImageData(0, 0, w, h);
+  const data = image.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const intensity = data[i + 3] / 255;
+    if (intensity < 0.02) {
+      data[i + 3] = 0;
+      continue;
+    }
+
+    const [r, g, b, a] = heatColor(Math.min(1, intensity * 1.9));
+    data[i] = r;
+    data[i + 1] = g;
+    data[i + 2] = b;
+    data[i + 3] = Math.round(a * 255);
+  }
+
+  ctx.putImageData(image, 0, 0);
+  return canvas;
 }
 
 function getBrowserHint(): string {
@@ -60,6 +143,7 @@ function getBrowserHint(): string {
 export default function TestRunnerPage({ params }: PageProps) {
   const { sessionToken } = params;
   const searchParams = useSearchParams();
+
   const [stage, setStage] = useState<TestStage>("permission");
   const [calibrationIndex, setCalibrationIndex] = useState(0);
   const [currentScreenId, setCurrentScreenId] = useState("screen-default");
@@ -70,6 +154,10 @@ export default function TestRunnerPage({ params }: PageProps) {
   const [engineName, setEngineName] = useState<"mediapipe" | "pointer-fallback" | null>(null);
   const [calibrationScores, setCalibrationScores] = useState<number[]>([]);
   const [sessionReport, setSessionReport] = useState<SessionReport | null>(null);
+  const [heatmapPngDataUrl, setHeatmapPngDataUrl] = useState<string | null>(null);
+  const [heatmapJpgDataUrl, setHeatmapJpgDataUrl] = useState<string | null>(null);
+  const [emailStatus, setEmailStatus] = useState<EmailStatus>("idle");
+
   const participantName = searchParams.get("participant")?.trim() ?? "";
 
   const streamRef = useRef<MediaStream | null>(null);
@@ -81,13 +169,18 @@ export default function TestRunnerPage({ params }: PageProps) {
   const latestGazePointRef = useRef<GazePoint | null>(null);
   const calibrationRetryRef = useRef<Record<number, number>>({});
   const runStartedAtRef = useRef<number | null>(null);
-  const reportSamplesRef = useRef<Array<{ ts: number; confidence: number; screenId: string }>>([]);
+  const reportSamplesRef = useRef<ReportSample[]>([]);
+
+  const figmaSourceUrl = useMemo(() => {
+    const figmaUrlFromQuery = searchParams.get("figmaUrl")?.trim();
+    return figmaUrlFromQuery || process.env.NEXT_PUBLIC_FIGMA_EMBED_URL || FIGMA_URL_PLACEHOLDER;
+  }, [searchParams]);
 
   const figmaEmbedUrl = useMemo(() => {
-    const figmaUrlFromQuery = searchParams.get("figmaUrl")?.trim();
-    const candidate = figmaUrlFromQuery || process.env.NEXT_PUBLIC_FIGMA_EMBED_URL || FIGMA_URL_PLACEHOLDER;
+    const candidate = figmaSourceUrl;
     return candidate.includes("embed_host") ? candidate : `${candidate}${candidate.includes("?") ? "&" : "?"}embed_host=eye-tracker`;
-  }, [searchParams]);
+  }, [figmaSourceUrl]);
+
   const isUsingPlaceholderFigma = figmaEmbedUrl.includes("your-file-id");
 
   const averageCalibrationScore = useMemo(() => {
@@ -130,17 +223,117 @@ export default function TestRunnerPage({ params }: PageProps) {
     flushTimerRef.current = null;
   };
 
+  const stopCameraStream = () => {
+    if (!streamRef.current) return;
+    streamRef.current.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+  };
+
+  const buildSessionReport = (): SessionReport => {
+    const samples = reportSamplesRef.current;
+    const totalSamples = samples.length;
+    const avgConfidence =
+      totalSamples > 0
+        ? Number((samples.reduce((acc, sample) => acc + sample.confidence, 0) / totalSamples).toFixed(2))
+        : 0;
+
+    const startTs = runStartedAtRef.current ?? samples[0]?.ts ?? Date.now();
+    const endTs = samples[samples.length - 1]?.ts ?? Date.now();
+    const durationSec = Math.max(0, Math.round((endTs - startTs) / 1000));
+
+    const counts = new Map<string, number>();
+    for (const sample of samples) {
+      counts.set(sample.screenId, (counts.get(sample.screenId) ?? 0) + 1);
+    }
+
+    const topScreens = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([screenId, samplesCount]) => ({ screenId, samples: samplesCount }));
+
+    return {
+      totalSamples,
+      avgConfidence,
+      durationSec,
+      topScreens
+    };
+  };
+
+  const generateHeatmapArtifacts = () => {
+    const frameElement = iframeRef.current;
+    if (!frameElement) {
+      return { pngDataUrl: null as string | null, jpgDataUrl: null as string | null };
+    }
+
+    const rect = frameElement.getBoundingClientRect();
+    const width = Math.max(320, Math.floor(rect.width));
+    const height = Math.max(220, Math.floor(rect.height));
+    const canvas = buildHeatmapCanvas(width, height, reportSamplesRef.current);
+
+    return {
+      pngDataUrl: canvas.toDataURL("image/png"),
+      jpgDataUrl: canvas.toDataURL("image/jpeg", 0.9)
+    };
+  };
+
+  const sendEmailReport = async (report: SessionReport, pngDataUrl: string | null, jpgDataUrl: string | null) => {
+    setEmailStatus("sending");
+    try {
+      const payload: EmailReportRequest = {
+        sessionToken,
+        participantName,
+        figmaUrl: figmaSourceUrl,
+        summary: report,
+        heatmapPngDataUrl: pngDataUrl ?? undefined,
+        heatmapJpgDataUrl: jpgDataUrl ?? undefined
+      };
+
+      const result = await emailSessionReport(payload);
+      if (result.status === "sent") {
+        setEmailStatus("sent");
+      } else {
+        setEmailStatus("skipped");
+        setWarning("Email sending was skipped by the server configuration.");
+      }
+    } catch (err) {
+      setEmailStatus("error");
+      setWarning(`Could not send email report: ${err instanceof Error ? err.message : "unknown error"}`);
+    }
+  };
+
   const handleGaze = (point: GazePoint) => {
     latestGazePointRef.current = point;
     setGazePoint({ x: point.x, y: point.y });
+
+    const rect = iframeRef.current?.getBoundingClientRect();
+    let inFrame = false;
+    let frameNX: number | undefined;
+    let frameNY: number | undefined;
+    if (rect && rect.width > 0 && rect.height > 0) {
+      const nx = (point.x - rect.left) / rect.width;
+      const ny = (point.y - rect.top) / rect.height;
+      inFrame = nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1;
+      if (inFrame) {
+        frameNX = nx;
+        frameNY = ny;
+      }
+    }
+
     reportSamplesRef.current.push({
       ts: point.ts,
       confidence: point.confidence,
-      screenId: currentScreenIdRef.current
+      screenId: currentScreenIdRef.current,
+      x: point.x,
+      y: point.y,
+      inFrame,
+      frameNX,
+      frameNY
     });
+
     if (reportSamplesRef.current.length > 100000) {
       reportSamplesRef.current = reportSamplesRef.current.slice(-100000);
     }
+
     queueEvent({
       type: "gaze_sample",
       ts: point.ts,
@@ -178,41 +371,6 @@ export default function TestRunnerPage({ params }: PageProps) {
   const stopEngine = () => {
     engineRef.current?.setListener(null);
     engineRef.current?.stop();
-  };
-
-  const stopCameraStream = () => {
-    if (!streamRef.current) return;
-    streamRef.current.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
-  };
-
-  const buildSessionReport = (): SessionReport => {
-    const samples = reportSamplesRef.current;
-    const totalSamples = samples.length;
-    const avgConfidence =
-      totalSamples > 0
-        ? Number((samples.reduce((acc, sample) => acc + sample.confidence, 0) / totalSamples).toFixed(2))
-        : 0;
-
-    const startTs = runStartedAtRef.current ?? samples[0]?.ts ?? Date.now();
-    const endTs = samples[samples.length - 1]?.ts ?? Date.now();
-    const durationSec = Math.max(0, Math.round((endTs - startTs) / 1000));
-
-    const counts = new Map<string, number>();
-    for (const sample of samples) {
-      counts.set(sample.screenId, (counts.get(sample.screenId) ?? 0) + 1);
-    }
-    const topScreens = [...counts.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5)
-      .map(([screenId, count]) => ({ screenId, samples: count }));
-
-    return {
-      totalSamples,
-      avgConfidence,
-      durationSec,
-      topScreens
-    };
   };
 
   const stopTracking = () => {
@@ -267,7 +425,6 @@ export default function TestRunnerPage({ params }: PageProps) {
     const targetY = (window.innerHeight * point.y) / 100;
     let result = engineRef.current?.recordCalibrationPoint(targetX, targetY) ?? null;
 
-    // Fallback: use the latest gaze sample shown on screen if engine did not return a point yet.
     if (!result && latestGazePointRef.current) {
       const latest = latestGazePointRef.current;
       const errorPx = pointDistance(latest.x, latest.y, targetX, targetY);
@@ -283,7 +440,6 @@ export default function TestRunnerPage({ params }: PageProps) {
       };
     }
 
-    // Last-resort: don't block calibration forever if predictions are intermittent.
     if (!result) {
       const tries = (calibrationRetryRef.current[index] ?? 0) + 1;
       calibrationRetryRef.current[index] = tries;
@@ -324,9 +480,17 @@ export default function TestRunnerPage({ params }: PageProps) {
   const onStopTest = async () => {
     stopTracking();
     await flushEvents();
-    setSessionReport(buildSessionReport());
+
+    const report = buildSessionReport();
+    setSessionReport(report);
+    const artifacts = generateHeatmapArtifacts();
+    setHeatmapPngDataUrl(artifacts.pngDataUrl);
+    setHeatmapJpgDataUrl(artifacts.jpgDataUrl);
+
     setStage("finished");
     setStatus("Session complete.");
+
+    void sendEmailReport(report, artifacts.pngDataUrl, artifacts.jpgDataUrl);
 
     try {
       await completeSession(sessionToken);
@@ -404,37 +568,15 @@ export default function TestRunnerPage({ params }: PageProps) {
 
       <section className="meta-strip">
         <span>Engine: {engineName ?? "not initialized"}</span>
-        <span>
-          Calibration score: {averageCalibrationScore !== null ? `${averageCalibrationScore}/100` : "pending"}
-        </span>
+        <span>Calibration score: {averageCalibrationScore !== null ? `${averageCalibrationScore}/100` : "pending"}</span>
+        <span>Email report: {emailStatus}</span>
       </section>
 
       {stage === "permission" && <CameraPermissionCard onGranted={onCameraGranted} />}
 
       {stage !== "permission" && (
         <section className="prototype-shell">
-          {stage === "finished" ? (
-            <div className="calibration-shell">
-              <h2>Session Complete</h2>
-              <p>Your local report is ready.</p>
-              {sessionReport && (
-                <div className="report-box">
-                  <p><strong>Total gaze samples:</strong> {sessionReport.totalSamples}</p>
-                  <p><strong>Average confidence:</strong> {sessionReport.avgConfidence}</p>
-                  <p><strong>Duration:</strong> {sessionReport.durationSec}s</p>
-                  <p><strong>Top viewed screens:</strong></p>
-                  <ul>
-                    {sessionReport.topScreens.length === 0 && <li>No screen data collected</li>}
-                    {sessionReport.topScreens.map((entry) => (
-                      <li key={entry.screenId}>
-                        {entry.screenId}: {entry.samples} samples
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          ) : stage === "calibration" ? (
+          {stage === "calibration" ? (
             <div className="calibration-shell">
               <h2>Calibration</h2>
               <p>Look at each point and click it to calibrate eye tracking.</p>
@@ -442,19 +584,63 @@ export default function TestRunnerPage({ params }: PageProps) {
             </div>
           ) : (
             <>
-              <iframe
-                ref={iframeRef}
-                title="Figma Prototype"
-                src={figmaEmbedUrl}
-                className="prototype-frame"
-                allow="camera; microphone"
-              />
-              <GazeOverlay x={gazePoint?.x ?? 0} y={gazePoint?.y ?? 0} visible={stage === "running" && !!gazePoint} />
+              <iframe ref={iframeRef} title="Figma Prototype" src={figmaEmbedUrl} className="prototype-frame" allow="camera; microphone" />
+              {stage === "running" && <GazeOverlay x={gazePoint?.x ?? 0} y={gazePoint?.y ?? 0} visible={!!gazePoint} />}
+              {stage === "finished" && heatmapPngDataUrl && (
+                <img src={heatmapPngDataUrl} alt="Heatmap overlay" className="heatmap-overlay" />
+              )}
             </>
           )}
           {stage === "calibration" && (
             <CalibrationLayer currentIndex={calibrationIndex} onPointConfirmed={onCalibrationPointConfirmed} />
           )}
+        </section>
+      )}
+
+      {stage === "finished" && sessionReport && (
+        <section className="report-box">
+          <h3>Session Report</h3>
+          <p>
+            <strong>Session ID:</strong> {sessionToken}
+          </p>
+          <p>
+            <strong>Participant:</strong> {participantName || "N/A"}
+          </p>
+          <p>
+            <strong>Figma URL:</strong> {figmaSourceUrl}
+          </p>
+          <p>
+            <strong>Total gaze samples:</strong> {sessionReport.totalSamples}
+          </p>
+          <p>
+            <strong>Average confidence:</strong> {sessionReport.avgConfidence}
+          </p>
+          <p>
+            <strong>Duration:</strong> {sessionReport.durationSec}s
+          </p>
+          <p>
+            <strong>Top viewed screens:</strong>
+          </p>
+          <ul>
+            {sessionReport.topScreens.length === 0 && <li>No screen data collected</li>}
+            {sessionReport.topScreens.map((entry) => (
+              <li key={entry.screenId}>
+                {entry.screenId}: {entry.samples} samples
+              </li>
+            ))}
+          </ul>
+          <div className="report-actions">
+            {heatmapPngDataUrl && (
+              <a href={heatmapPngDataUrl} download={`${sessionToken}-heatmap.png`} className="report-download-link">
+                Download PNG
+              </a>
+            )}
+            {heatmapJpgDataUrl && (
+              <a href={heatmapJpgDataUrl} download={`${sessionToken}-heatmap.jpg`} className="report-download-link">
+                Download JPG
+              </a>
+            )}
+          </div>
         </section>
       )}
 

@@ -57,6 +57,16 @@ body {
   border: none;
 }
 
+.heatmap-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+  opacity: 0.72;
+}
+
 .calibration-shell {
   position: absolute;
   inset: 0;
@@ -200,6 +210,28 @@ button:disabled {
 
 .report-box p {
   margin: 6px 0;
+}
+
+.report-box h3 {
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+
+.report-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.report-download-link {
+  display: inline-block;
+  text-decoration: none;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #1135a7;
+  color: #ffffff;
+  font-weight: 600;
 }
 
 @media (max-width: 900px) {
