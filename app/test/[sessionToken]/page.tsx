@@ -261,13 +261,9 @@ export default function TestRunnerPage({ params }: PageProps) {
 
   const generateHeatmapArtifacts = () => {
     const frameElement = iframeRef.current;
-    if (!frameElement) {
-      return { pngDataUrl: null as string | null, jpgDataUrl: null as string | null };
-    }
-
-    const rect = frameElement.getBoundingClientRect();
-    const width = Math.max(320, Math.floor(rect.width));
-    const height = Math.max(220, Math.floor(rect.height));
+    const rect = frameElement?.getBoundingClientRect();
+    const width = Math.max(320, Math.floor(rect?.width ?? window.innerWidth * 0.8));
+    const height = Math.max(220, Math.floor(rect?.height ?? window.innerHeight * 0.65));
     const canvas = buildHeatmapCanvas(width, height, reportSamplesRef.current);
 
     return {
@@ -630,24 +626,40 @@ export default function TestRunnerPage({ params }: PageProps) {
             ))}
           </ul>
           <div className="report-actions">
-            {heatmapPngDataUrl && (
+            {heatmapPngDataUrl ? (
               <a href={heatmapPngDataUrl} download={`${sessionToken}-heatmap.png`} className="report-download-link">
                 Download PNG
               </a>
+            ) : (
+              <span>PNG not ready</span>
             )}
-            {heatmapJpgDataUrl && (
+            {heatmapJpgDataUrl ? (
               <a href={heatmapJpgDataUrl} download={`${sessionToken}-heatmap.jpg`} className="report-download-link">
                 Download JPG
               </a>
+            ) : (
+              <span>JPG not ready</span>
             )}
           </div>
         </section>
       )}
 
       <footer className="runner-footer">
-        <button onClick={onStopTest} disabled={stage !== "running"} className="stop-button">
-          End Test
-        </button>
+        <div className="report-actions">
+          <button onClick={onStopTest} disabled={stage !== "running"} className="stop-button">
+            End Test
+          </button>
+          {stage === "finished" && heatmapPngDataUrl && (
+            <a href={heatmapPngDataUrl} download={`${sessionToken}-heatmap.png`} className="report-download-link">
+              Download PNG
+            </a>
+          )}
+          {stage === "finished" && heatmapJpgDataUrl && (
+            <a href={heatmapJpgDataUrl} download={`${sessionToken}-heatmap.jpg`} className="report-download-link">
+              Download JPG
+            </a>
+          )}
+        </div>
         {stage === "finished" && <p>Done. Camera has been stopped.</p>}
       </footer>
     </main>
