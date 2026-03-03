@@ -46,7 +46,8 @@ declare global {
 }
 
 const WEBGAZER_SCRIPT_ID = "webgazer-script";
-const WEBGAZER_URL = "https://webgazer.cs.brown.edu/webgazer.js";
+const WEBGAZER_PRIMARY_URL = "https://cdn.jsdelivr.net/npm/webgazer@3.4.0/dist/webgazer.js";
+const WEBGAZER_FALLBACK_URL = "https://webgazer.cs.brown.edu/webgazer.js";
 
 function distance(aX: number, aY: number, bX: number, bY: number): number {
   const dx = aX - bX;
@@ -58,6 +59,25 @@ function scoreFromErrorPx(errorPx: number): number {
   const worstUsefulError = 300;
   const normalized = Math.max(0, 1 - errorPx / worstUsefulError);
   return Math.round(normalized * 100);
+}
+
+async function appendWebGazerScript(scriptUrl: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const script = document.createElement("script");
+    script.id = WEBGAZER_SCRIPT_ID;
+    script.src = scriptUrl;
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error(`Failed to load WebGazer script: ${scriptUrl}`));
+    document.head.appendChild(script);
+  });
+}
+
+function removeExistingWebGazerScript(): void {
+  const existing = document.getElementById(WEBGAZER_SCRIPT_ID);
+  if (existing?.parentNode) {
+    existing.parentNode.removeChild(existing);
+  }
 }
 
 async function loadWebGazerScript(): Promise<WebGazerLike | null> {
@@ -77,15 +97,27 @@ async function loadWebGazerScript(): Promise<WebGazerLike | null> {
     return window.webgazer ?? null;
   }
 
-  await new Promise<void>((resolve, reject) => {
-    const script = document.createElement("script");
-    script.id = WEBGAZER_SCRIPT_ID;
-    script.src = WEBGAZER_URL;
-    script.async = true;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error("Failed to load WebGazer script"));
-    document.head.appendChild(script);
-  });
+  const configuredScriptUrl =
+    process.env.NEXT_PUBLIC_WEBGAZER_SCRIPT_URL &&
+    process.env.NEXT_PUBLIC_WEBGAZER_SCRIPT_URL.trim().length > 0
+      ? process.env.NEXT_PUBLIC_WEBGAZER_SCRIPT_URL.trim()
+      : undefined;
+  const scriptUrls = [configuredScriptUrl, WEBGAZER_PRIMARY_URL, WEBGAZER_FALLBACK_URL].filter(
+    (url): url is string => typeof url === "string" && url.length > 0
+  );
+  let lastError: Error | null = null;
+
+  for (const scriptUrl of scriptUrls) {
+    try {
+      removeExistingWebGazerScript();
+      await appendWebGazerScript(scriptUrl);
+      if (window.webgazer) return window.webgazer;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error("Unknown WebGazer load error");
+    }
+  }
+
+  if (lastError) throw lastError;
 
   return window.webgazer ?? null;
 }
@@ -109,15 +141,7 @@ function createWebGazerEngine(webgazer: WebGazerLike): GazeEngine {
     listener(point);
   };
 
-  if (typeof webgazer.showVideo === "function") {
-    webgazer.showVideo(false);
-  }
-  if (typeof webgazer.showPredictionPoints === "function") {
-    webgazer.showPredictionPoints(false);
-  }
-  if (typeof webgazer.saveDataAcrossSessions === "function") {
-    webgazer.saveDataAcrossSessions(false);
-  }
+  // Keep integration minimal to avoid runtime incompatibilities across WebGazer builds.
   if (typeof webgazer.setGazeListener === "function") {
     webgazer.setGazeListener(gazeListener);
   } else {
@@ -130,7 +154,7 @@ function createWebGazerEngine(webgazer: WebGazerLike): GazeEngine {
       if (typeof webgazer.begin !== "function") {
         throw new Error("WebGazer begin API unavailable");
       }
-      await webgazer.begin();
+      await Promise.resolve(webgazer.begin());
       if (webgazer.resume) webgazer.resume();
       running = true;
     },

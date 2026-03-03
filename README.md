@@ -64,6 +64,7 @@ You can pass setup values directly in the URL:
 
 ## Notes
 
-- WebGazer script is loaded from `https://webgazer.cs.brown.edu/webgazer.js` at runtime.
+- WebGazer script is loaded from CDN at runtime, with fallbacks.
+- You can override script source with `NEXT_PUBLIC_WEBGAZER_SCRIPT_URL`.
 - If WebGazer fails to load, the app falls back to pointer tracking so the full flow still works.
 - Figma navigation events are expected through `window.postMessage` with `type: "figma_navigation"`.
