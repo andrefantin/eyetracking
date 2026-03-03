@@ -24,6 +24,13 @@ type PageProps = {
   params: { sessionToken: string };
 };
 
+type SessionReport = {
+  totalSamples: number;
+  avgConfidence: number;
+  durationSec: number;
+  topScreens: Array<{ screenId: string; samples: number }>;
+};
+
 const BATCH_INTERVAL_MS = 750;
 const BATCH_MAX_EVENTS = 50;
 const FIGMA_URL_PLACEHOLDER = "https://www.figma.com/proto/your-file-id/your-prototype";
@@ -59,8 +66,10 @@ export default function TestRunnerPage({ params }: PageProps) {
   const [gazePoint, setGazePoint] = useState<{ x: number; y: number } | null>(null);
   const [status, setStatus] = useState("Waiting for camera permission");
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [engineName, setEngineName] = useState<"mediapipe" | "pointer-fallback" | null>(null);
   const [calibrationScores, setCalibrationScores] = useState<number[]>([]);
+  const [sessionReport, setSessionReport] = useState<SessionReport | null>(null);
   const participantName = searchParams.get("participant")?.trim() ?? "";
 
   const streamRef = useRef<MediaStream | null>(null);
@@ -71,6 +80,8 @@ export default function TestRunnerPage({ params }: PageProps) {
   const currentScreenIdRef = useRef(currentScreenId);
   const latestGazePointRef = useRef<GazePoint | null>(null);
   const calibrationRetryRef = useRef<Record<number, number>>({});
+  const runStartedAtRef = useRef<number | null>(null);
+  const reportSamplesRef = useRef<Array<{ ts: number; confidence: number; screenId: string }>>([]);
 
   const figmaEmbedUrl = useMemo(() => {
     const figmaUrlFromQuery = searchParams.get("figmaUrl")?.trim();
@@ -122,6 +133,14 @@ export default function TestRunnerPage({ params }: PageProps) {
   const handleGaze = (point: GazePoint) => {
     latestGazePointRef.current = point;
     setGazePoint({ x: point.x, y: point.y });
+    reportSamplesRef.current.push({
+      ts: point.ts,
+      confidence: point.confidence,
+      screenId: currentScreenIdRef.current
+    });
+    if (reportSamplesRef.current.length > 100000) {
+      reportSamplesRef.current = reportSamplesRef.current.slice(-100000);
+    }
     queueEvent({
       type: "gaze_sample",
       ts: point.ts,
@@ -161,8 +180,44 @@ export default function TestRunnerPage({ params }: PageProps) {
     engineRef.current?.stop();
   };
 
+  const stopCameraStream = () => {
+    if (!streamRef.current) return;
+    streamRef.current.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+  };
+
+  const buildSessionReport = (): SessionReport => {
+    const samples = reportSamplesRef.current;
+    const totalSamples = samples.length;
+    const avgConfidence =
+      totalSamples > 0
+        ? Number((samples.reduce((acc, sample) => acc + sample.confidence, 0) / totalSamples).toFixed(2))
+        : 0;
+
+    const startTs = runStartedAtRef.current ?? samples[0]?.ts ?? Date.now();
+    const endTs = samples[samples.length - 1]?.ts ?? Date.now();
+    const durationSec = Math.max(0, Math.round((endTs - startTs) / 1000));
+
+    const counts = new Map<string, number>();
+    for (const sample of samples) {
+      counts.set(sample.screenId, (counts.get(sample.screenId) ?? 0) + 1);
+    }
+    const topScreens = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([screenId, count]) => ({ screenId, samples: count }));
+
+    return {
+      totalSamples,
+      avgConfidence,
+      durationSec,
+      topScreens
+    };
+  };
+
   const stopTracking = () => {
     stopEngine();
+    stopCameraStream();
     queueEvent({ type: "session_pause", ts: Date.now() });
     stopBatchLoop();
     setStatus("Tracking stopped");
@@ -254,6 +309,7 @@ export default function TestRunnerPage({ params }: PageProps) {
 
     if (index + 1 >= CALIBRATION_POINTS.length) {
       setStage("running");
+      runStartedAtRef.current = Date.now();
       queueEvent({
         type: "session_resume",
         ts: Date.now()
@@ -268,13 +324,18 @@ export default function TestRunnerPage({ params }: PageProps) {
   const onStopTest = async () => {
     stopTracking();
     await flushEvents();
+    setSessionReport(buildSessionReport());
+    setStage("finished");
+    setStatus("Session complete.");
 
     try {
       await completeSession(sessionToken);
-      setStage("finished");
-      setStatus("Session complete. Report generation has started.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to complete session");
+      setWarning(
+        `Session ended locally, but backend completion failed: ${
+          err instanceof Error ? err.message : "unknown error"
+        }`
+      );
     }
   };
 
@@ -317,7 +378,7 @@ export default function TestRunnerPage({ params }: PageProps) {
     return () => {
       stopEngine();
       stopBatchLoop();
-      streamRef.current?.getTracks().forEach((track) => track.stop());
+      stopCameraStream();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -334,6 +395,7 @@ export default function TestRunnerPage({ params }: PageProps) {
       </header>
 
       {error && <p className="error-banner">{error}</p>}
+      {warning && <p className="warning-banner">{warning}</p>}
       {isUsingPlaceholderFigma && (
         <p className="error-banner">
           No Figma prototype URL detected. Go back to the home page and paste a real `https://www.figma.com/proto/...` link.
@@ -351,7 +413,28 @@ export default function TestRunnerPage({ params }: PageProps) {
 
       {stage !== "permission" && (
         <section className="prototype-shell">
-          {stage === "calibration" ? (
+          {stage === "finished" ? (
+            <div className="calibration-shell">
+              <h2>Session Complete</h2>
+              <p>Your local report is ready.</p>
+              {sessionReport && (
+                <div className="report-box">
+                  <p><strong>Total gaze samples:</strong> {sessionReport.totalSamples}</p>
+                  <p><strong>Average confidence:</strong> {sessionReport.avgConfidence}</p>
+                  <p><strong>Duration:</strong> {sessionReport.durationSec}s</p>
+                  <p><strong>Top viewed screens:</strong></p>
+                  <ul>
+                    {sessionReport.topScreens.length === 0 && <li>No screen data collected</li>}
+                    {sessionReport.topScreens.map((entry) => (
+                      <li key={entry.screenId}>
+                        {entry.screenId}: {entry.samples} samples
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          ) : stage === "calibration" ? (
             <div className="calibration-shell">
               <h2>Calibration</h2>
               <p>Look at each point and click it to calibrate eye tracking.</p>
@@ -379,7 +462,7 @@ export default function TestRunnerPage({ params }: PageProps) {
         <button onClick={onStopTest} disabled={stage !== "running"} className="stop-button">
           End Test
         </button>
-        {stage === "finished" && <p>Done. You can close this window.</p>}
+        {stage === "finished" && <p>Done. Camera has been stopped.</p>}
       </footer>
     </main>
   );

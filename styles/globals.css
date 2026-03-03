@@ -171,12 +171,35 @@ button:disabled {
   color: #b42318;
 }
 
+.warning-banner {
+  margin: 0;
+  color: #8a3b00;
+  background: #fff4e8;
+  border: 1px solid #ffd7b0;
+  padding: 10px 12px;
+  border-radius: 10px;
+}
+
 .error-banner {
   margin: 0;
   background: #fdebec;
   border: 1px solid #f6c7cc;
   padding: 10px 12px;
   border-radius: 10px;
+}
+
+.report-box {
+  margin-top: 12px;
+  text-align: left;
+  background: #ffffff;
+  border: 1px solid #dbe4ff;
+  border-radius: 10px;
+  padding: 12px;
+  min-width: min(520px, 90vw);
+}
+
+.report-box p {
+  margin: 6px 0;
 }
 
 @media (max-width: 900px) {
