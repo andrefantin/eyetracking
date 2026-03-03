@@ -27,12 +27,12 @@ export type GazeEngine = {
 };
 
 type WebGazerLike = {
-  begin: () => Promise<unknown>;
-  end: () => void;
-  showVideo: (show: boolean) => WebGazerLike;
-  showPredictionPoints: (show: boolean) => WebGazerLike;
-  saveDataAcrossSessions: (save: boolean) => WebGazerLike;
-  setGazeListener: (cb: (data: { x: number; y: number } | null, ts: number) => void) => WebGazerLike;
+  begin?: () => Promise<unknown> | unknown;
+  end?: () => void;
+  showVideo?: (show: boolean) => WebGazerLike | unknown;
+  showPredictionPoints?: (show: boolean) => WebGazerLike | unknown;
+  saveDataAcrossSessions?: (save: boolean) => WebGazerLike | unknown;
+  setGazeListener?: (cb: (data: { x: number; y: number } | null, ts: number) => void) => WebGazerLike | unknown;
   clearGazeListener?: () => WebGazerLike;
   pause?: () => WebGazerLike;
   resume?: () => WebGazerLike;
@@ -109,15 +109,27 @@ function createWebGazerEngine(webgazer: WebGazerLike): GazeEngine {
     listener(point);
   };
 
-  webgazer
-    .showVideo(false)
-    .showPredictionPoints(false)
-    .saveDataAcrossSessions(false)
-    .setGazeListener(gazeListener);
+  if (typeof webgazer.showVideo === "function") {
+    webgazer.showVideo(false);
+  }
+  if (typeof webgazer.showPredictionPoints === "function") {
+    webgazer.showPredictionPoints(false);
+  }
+  if (typeof webgazer.saveDataAcrossSessions === "function") {
+    webgazer.saveDataAcrossSessions(false);
+  }
+  if (typeof webgazer.setGazeListener === "function") {
+    webgazer.setGazeListener(gazeListener);
+  } else {
+    throw new Error("WebGazer setGazeListener API unavailable");
+  }
 
   return {
     async start() {
       if (running) return;
+      if (typeof webgazer.begin !== "function") {
+        throw new Error("WebGazer begin API unavailable");
+      }
       await webgazer.begin();
       if (webgazer.resume) webgazer.resume();
       running = true;
@@ -170,7 +182,7 @@ function createWebGazerEngine(webgazer: WebGazerLike): GazeEngine {
   };
 }
 
-function createPointerFallbackEngine(): GazeEngine {
+export function createPointerFallbackEngine(): GazeEngine {
   let listener: GazeHandler | null = null;
   let running = false;
   let recentPoints: GazePoint[] = [];
@@ -228,7 +240,7 @@ function createPointerFallbackEngine(): GazeEngine {
 export async function createGazeEngine(): Promise<GazeEngine> {
   try {
     const webgazer = await loadWebGazerScript();
-    if (webgazer) {
+    if (webgazer && typeof webgazer.setGazeListener === "function" && typeof webgazer.begin === "function") {
       return createWebGazerEngine(webgazer);
     }
   } catch {

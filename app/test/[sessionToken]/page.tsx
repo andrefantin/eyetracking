@@ -8,7 +8,13 @@ import CameraPermissionCard from "@/components/CameraPermissionCard";
 import GazeOverlay from "@/components/GazeOverlay";
 import { completeSession, postEventsBatch } from "@/lib/api";
 import { CALIBRATION_POINTS } from "@/lib/calibration";
-import { createGazeEngine, type CalibrationPointResult, type GazeEngine, type GazePoint } from "@/lib/gaze";
+import {
+  createGazeEngine,
+  createPointerFallbackEngine,
+  type CalibrationPointResult,
+  type GazeEngine,
+  type GazePoint
+} from "@/lib/gaze";
 import { getClientContext } from "@/lib/mapping";
 import type { TrackingEvent } from "@/lib/types";
 
@@ -112,13 +118,22 @@ export default function TestRunnerPage({ params }: PageProps) {
   };
 
   const initializeAndStartEngine = async () => {
-    if (!engineRef.current) {
-      engineRef.current = await createGazeEngine();
-      setEngineName(engineRef.current.getEngineName());
-    }
+    try {
+      if (!engineRef.current) {
+        engineRef.current = await createGazeEngine();
+        setEngineName(engineRef.current.getEngineName());
+      }
 
-    engineRef.current.setListener(handleGaze);
-    await engineRef.current.start();
+      engineRef.current.setListener(handleGaze);
+      await engineRef.current.start();
+    } catch {
+      const fallback = createPointerFallbackEngine();
+      fallback.setListener(handleGaze);
+      await fallback.start();
+      engineRef.current = fallback;
+      setEngineName(fallback.getEngineName());
+      setError("Webcam eye tracker could not start. Running in pointer fallback mode.");
+    }
   };
 
   const stopEngine = () => {
