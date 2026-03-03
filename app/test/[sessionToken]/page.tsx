@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 
 import CalibrationLayer from "@/components/CalibrationLayer";
 import CameraPermissionCard from "@/components/CameraPermissionCard";
@@ -23,6 +24,7 @@ const FIGMA_URL_PLACEHOLDER = "https://www.figma.com/proto/your-file-id/your-pro
 
 export default function TestRunnerPage({ params }: PageProps) {
   const { sessionToken } = params;
+  const searchParams = useSearchParams();
   const [stage, setStage] = useState<TestStage>("permission");
   const [calibrationIndex, setCalibrationIndex] = useState(0);
   const [currentScreenId, setCurrentScreenId] = useState("screen-default");
@@ -31,6 +33,7 @@ export default function TestRunnerPage({ params }: PageProps) {
   const [error, setError] = useState<string | null>(null);
   const [engineName, setEngineName] = useState<"webgazer" | "pointer-fallback" | null>(null);
   const [calibrationScores, setCalibrationScores] = useState<number[]>([]);
+  const participantName = searchParams.get("participant")?.trim() ?? "";
 
   const streamRef = useRef<MediaStream | null>(null);
   const engineRef = useRef<GazeEngine | null>(null);
@@ -40,9 +43,11 @@ export default function TestRunnerPage({ params }: PageProps) {
   const currentScreenIdRef = useRef(currentScreenId);
 
   const figmaEmbedUrl = useMemo(() => {
-    const candidate = process.env.NEXT_PUBLIC_FIGMA_EMBED_URL ?? FIGMA_URL_PLACEHOLDER;
+    const figmaUrlFromQuery = searchParams.get("figmaUrl")?.trim();
+    const candidate = figmaUrlFromQuery || process.env.NEXT_PUBLIC_FIGMA_EMBED_URL || FIGMA_URL_PLACEHOLDER;
     return candidate.includes("embed_host") ? candidate : `${candidate}${candidate.includes("?") ? "&" : "?"}embed_host=eye-tracker`;
-  }, []);
+  }, [searchParams]);
+  const isUsingPlaceholderFigma = figmaEmbedUrl.includes("your-file-id");
 
   const averageCalibrationScore = useMemo(() => {
     if (!calibrationScores.length) return null;
@@ -242,11 +247,17 @@ export default function TestRunnerPage({ params }: PageProps) {
         <div>
           <h1>Prototype Test Session</h1>
           <p>Session: {sessionToken}</p>
+          {participantName && <p>Participant: {participantName}</p>}
         </div>
         <div className="status-pill">{status}</div>
       </header>
 
       {error && <p className="error-banner">{error}</p>}
+      {isUsingPlaceholderFigma && (
+        <p className="error-banner">
+          No Figma prototype URL detected. Go back to the home page and paste a real `https://www.figma.com/proto/...` link.
+        </p>
+      )}
 
       <section className="meta-strip">
         <span>Engine: {engineName ?? "not initialized"}</span>

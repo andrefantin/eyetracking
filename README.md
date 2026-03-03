@@ -5,6 +5,10 @@ This is a Next.js app you can deploy directly to Vercel.
 ## Included
 
 - Route: `/test/[sessionToken]`
+- Friendly session setup on `/`:
+  - participant name
+  - per-session Figma prototype URL
+  - auto-generated session token
 - Camera permission prompt
 - 9-point calibration overlay
 - WebGazer integration (auto-fallback to pointer mode)
@@ -34,7 +38,7 @@ This is a Next.js app you can deploy directly to Vercel.
    - `NEXT_PUBLIC_FIGMA_EMBED_URL` = your Figma prototype URL
 5. Deploy.
 6. Open deployed URL:
-   - `https://<your-app>.vercel.app/test/demo-token`
+   - `https://<your-app>.vercel.app/`
 
 ## Using a real backend later
 
@@ -49,6 +53,14 @@ Then the client will call:
 ## Event notes
 
 This client emits `calibration_result` events in addition to gaze/navigation/session events. Ensure your backend validation accepts this event type.
+
+## URL overrides
+
+You can pass setup values directly in the URL:
+
+- `/test/<sessionToken>?participant=Participant%2001`
+- `/test/<sessionToken>?figmaUrl=https%3A%2F%2Fwww.figma.com%2Fproto%2F...`
+- both can be combined.
 
 ## Notes
 
