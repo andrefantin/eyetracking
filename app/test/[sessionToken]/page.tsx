@@ -21,6 +21,13 @@ type PageProps = {
 const BATCH_INTERVAL_MS = 750;
 const BATCH_MAX_EVENTS = 50;
 const FIGMA_URL_PLACEHOLDER = "https://www.figma.com/proto/your-file-id/your-prototype";
+const CALIBRATION_MAX_RETRIES_PER_POINT = 2;
+
+function pointDistance(aX: number, aY: number, bX: number, bY: number): number {
+  const dx = aX - bX;
+  const dy = aY - bY;
+  return Math.sqrt(dx * dx + dy * dy);
+}
 
 export default function TestRunnerPage({ params }: PageProps) {
   const { sessionToken } = params;
@@ -41,6 +48,8 @@ export default function TestRunnerPage({ params }: PageProps) {
   const flushTimerRef = useRef<number | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const currentScreenIdRef = useRef(currentScreenId);
+  const latestGazePointRef = useRef<GazePoint | null>(null);
+  const calibrationRetryRef = useRef<Record<number, number>>({});
 
   const figmaEmbedUrl = useMemo(() => {
     const figmaUrlFromQuery = searchParams.get("figmaUrl")?.trim();
@@ -90,6 +99,7 @@ export default function TestRunnerPage({ params }: PageProps) {
   };
 
   const handleGaze = (point: GazePoint) => {
+    latestGazePointRef.current = point;
     setGazePoint({ x: point.x, y: point.y });
     queueEvent({
       type: "gaze_sample",
@@ -165,7 +175,43 @@ export default function TestRunnerPage({ params }: PageProps) {
     const point = CALIBRATION_POINTS[index];
     const targetX = (window.innerWidth * point.x) / 100;
     const targetY = (window.innerHeight * point.y) / 100;
-    const result = engineRef.current?.recordCalibrationPoint(targetX, targetY) ?? null;
+    let result = engineRef.current?.recordCalibrationPoint(targetX, targetY) ?? null;
+
+    // Fallback: use the latest gaze sample shown on screen if engine did not return a point yet.
+    if (!result && latestGazePointRef.current) {
+      const latest = latestGazePointRef.current;
+      const errorPx = pointDistance(latest.x, latest.y, targetX, targetY);
+      const score = Math.max(0, Math.round((1 - errorPx / 300) * 100));
+      result = {
+        targetX,
+        targetY,
+        sampleCount: 1,
+        avgX: latest.x,
+        avgY: latest.y,
+        errorPx,
+        score
+      };
+    }
+
+    // Last-resort: don't block calibration forever if predictions are intermittent.
+    if (!result) {
+      const tries = (calibrationRetryRef.current[index] ?? 0) + 1;
+      calibrationRetryRef.current[index] = tries;
+      if (tries > CALIBRATION_MAX_RETRIES_PER_POINT) {
+        result = {
+          targetX,
+          targetY,
+          sampleCount: 0,
+          avgX: targetX,
+          avgY: targetY,
+          errorPx: 300,
+          score: 0
+        };
+        setError("Calibration signal is weak. Continuing with low-confidence calibration.");
+      }
+    } else {
+      calibrationRetryRef.current[index] = 0;
+    }
 
     handleCalibrationResult(index, result);
 

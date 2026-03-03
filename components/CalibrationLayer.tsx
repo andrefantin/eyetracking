@@ -26,7 +26,9 @@ export default function CalibrationLayer({ currentIndex, onPointConfirmed }: Pro
           </button>
         );
       })}
-      <p className="calibration-help">Click each highlighted point while looking directly at it.</p>
+      <p className="calibration-help">
+        Click each highlighted point while looking directly at it. If detection is slow, wait 1-2 seconds and click again.
+      </p>
     </div>
   );
 }
