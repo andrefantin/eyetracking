@@ -57,6 +57,33 @@ body {
   border: none;
 }
 
+.calibration-shell {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 8px;
+  text-align: center;
+  padding: 24px;
+  background: linear-gradient(180deg, #f8faff 0%, #eef3ff 100%);
+}
+
+.calibration-shell h2 {
+  margin: 0;
+  color: #0f1f63;
+}
+
+.calibration-shell p {
+  margin: 0;
+  color: #233876;
+}
+
+.calibration-subtle {
+  font-size: 14px;
+  color: #475569 !important;
+}
+
 .gaze-overlay {
   position: fixed;
   width: 20px;

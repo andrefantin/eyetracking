@@ -11,7 +11,7 @@ This is a Next.js app you can deploy directly to Vercel.
   - auto-generated session token
 - Camera permission prompt
 - 9-point calibration overlay
-- WebGazer integration (auto-fallback to pointer mode)
+- MediaPipe Face Mesh integration (auto-fallback to pointer mode)
 - Calibration quality scoring (`0-100`) with per-point telemetry
 - Live gaze indicator overlay
 - Built-in mock API routes for server deployment:
@@ -64,7 +64,6 @@ You can pass setup values directly in the URL:
 
 ## Notes
 
-- WebGazer script is loaded from CDN at runtime, with fallbacks.
-- You can override script source with `NEXT_PUBLIC_WEBGAZER_SCRIPT_URL`.
-- If WebGazer fails to load, the app falls back to pointer tracking so the full flow still works.
+- MediaPipe Face Mesh script is loaded from CDN at runtime.
+- If MediaPipe fails to initialize, the app falls back to pointer tracking so the flow still works.
 - Figma navigation events are expected through `window.postMessage` with `type: "figma_navigation"`.

@@ -37,11 +37,15 @@ function pointDistance(aX: number, aY: number, bX: number, bY: number): number {
 
 function getBrowserHint(): string {
   const ua = navigator.userAgent.toLowerCase();
+  const insecureContext = window.location.protocol !== "https:" && window.location.hostname !== "localhost";
+  if (insecureContext) {
+    return "Eye tracking requires HTTPS (or localhost). Deploy over HTTPS and retry.";
+  }
   if (ua.includes("safari") && !ua.includes("chrome")) {
-    return "Safari has limited support for webcam gaze tracking. Use latest Chrome for best results.";
+    return "Safari has limited support for webcam landmark tracking. Use latest Chrome for best results.";
   }
   if (ua.includes("firefox")) {
-    return "Firefox support can be unstable for WebGazer. Use latest Chrome for best results.";
+    return "Firefox support can be unstable for webcam landmark tracking. Use latest Chrome for best results.";
   }
   return "Ensure camera permission is allowed for this site and retry.";
 }
@@ -55,7 +59,7 @@ export default function TestRunnerPage({ params }: PageProps) {
   const [gazePoint, setGazePoint] = useState<{ x: number; y: number } | null>(null);
   const [status, setStatus] = useState("Waiting for camera permission");
   const [error, setError] = useState<string | null>(null);
-  const [engineName, setEngineName] = useState<"webgazer" | "pointer-fallback" | null>(null);
+  const [engineName, setEngineName] = useState<"mediapipe" | "pointer-fallback" | null>(null);
   const [calibrationScores, setCalibrationScores] = useState<number[]>([]);
   const participantName = searchParams.get("participant")?.trim() ?? "";
 
@@ -135,8 +139,12 @@ export default function TestRunnerPage({ params }: PageProps) {
         setEngineName(engineRef.current.getEngineName());
       }
 
+      if (!streamRef.current) {
+        throw new Error("Camera stream not available");
+      }
+
       engineRef.current.setListener(handleGaze);
-      await engineRef.current.start();
+      await engineRef.current.start(streamRef.current);
     } catch (err) {
       const fallback = createPointerFallbackEngine();
       fallback.setListener(handleGaze);
@@ -343,14 +351,24 @@ export default function TestRunnerPage({ params }: PageProps) {
 
       {stage !== "permission" && (
         <section className="prototype-shell">
-          <iframe
-            ref={iframeRef}
-            title="Figma Prototype"
-            src={figmaEmbedUrl}
-            className="prototype-frame"
-            allow="camera; microphone"
-          />
-          <GazeOverlay x={gazePoint?.x ?? 0} y={gazePoint?.y ?? 0} visible={(stage === "running" || stage === "calibration") && !!gazePoint} />
+          {stage === "calibration" ? (
+            <div className="calibration-shell">
+              <h2>Calibration</h2>
+              <p>Look at each point and click it to calibrate eye tracking.</p>
+              <p className="calibration-subtle">The prototype will appear after calibration is complete.</p>
+            </div>
+          ) : (
+            <>
+              <iframe
+                ref={iframeRef}
+                title="Figma Prototype"
+                src={figmaEmbedUrl}
+                className="prototype-frame"
+                allow="camera; microphone"
+              />
+              <GazeOverlay x={gazePoint?.x ?? 0} y={gazePoint?.y ?? 0} visible={stage === "running" && !!gazePoint} />
+            </>
+          )}
           {stage === "calibration" && (
             <CalibrationLayer currentIndex={calibrationIndex} onPointConfirmed={onCalibrationPointConfirmed} />
           )}
