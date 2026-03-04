@@ -304,6 +304,7 @@ export default function TestRunnerPage({ params }: PageProps) {
   const [heatmapJpgDataUrl, setHeatmapJpgDataUrl] = useState<string | null>(null);
   const [reportPdfDataUrl, setReportPdfDataUrl] = useState<string | null>(null);
   const [emailStatus, setEmailStatus] = useState<EmailStatus>("idle");
+  const [usingDirectWebsiteFallback, setUsingDirectWebsiteFallback] = useState(false);
 
   const participantName = searchParams.get("participant")?.trim() ?? "";
 
@@ -321,6 +322,7 @@ export default function TestRunnerPage({ params }: PageProps) {
   const pointerPosRef = useRef<{ x: number; y: number } | null>(null);
   const currentProtoScrollYRef = useRef(0);
   const maxProtoDocHeightRef = useRef(0);
+  const proxyMetricsSeenRef = useRef(false);
 
   const figmaSourceUrl = useMemo(() => {
     const targetUrlFromQuery = searchParams.get("targetUrl")?.trim();
@@ -333,9 +335,16 @@ export default function TestRunnerPage({ params }: PageProps) {
     return candidate.includes("embed_host") ? candidate : `${candidate}${candidate.includes("?") ? "&" : "?"}embed_host=eye-tracker`;
   }, [figmaSourceUrl]);
   const isFigmaTarget = useMemo(() => /https?:\/\/(www\.)?figma\.com\/proto\//i.test(figmaSourceUrl), [figmaSourceUrl]);
-  const iframeUrl = useMemo(() => {
-    if (isFigmaTarget) return figmaEmbedUrl;
-    return `/api/proxy-view?target=${encodeURIComponent(figmaSourceUrl)}`;
+  const [activeIframeUrl, setActiveIframeUrl] = useState<string>("");
+
+  useEffect(() => {
+    if (isFigmaTarget) {
+      setActiveIframeUrl(figmaEmbedUrl);
+      setUsingDirectWebsiteFallback(false);
+      return;
+    }
+    setActiveIframeUrl(`/api/proxy-view?target=${encodeURIComponent(figmaSourceUrl)}`);
+    setUsingDirectWebsiteFallback(false);
   }, [figmaEmbedUrl, figmaSourceUrl, isFigmaTarget]);
 
   const isUsingPlaceholderFigma = figmaEmbedUrl.includes("your-file-id");
@@ -759,6 +768,7 @@ export default function TestRunnerPage({ params }: PageProps) {
     const onProxyMetrics = (event: MessageEvent) => {
       if (typeof event.data !== "object" || !event.data) return;
       if (event.data.type !== "proxy_metrics") return;
+      proxyMetricsSeenRef.current = true;
       const scrollY = Number(event.data.scrollY);
       const docHeight = Number(event.data.docHeight);
       if (Number.isFinite(scrollY)) {
@@ -769,16 +779,44 @@ export default function TestRunnerPage({ params }: PageProps) {
       }
     };
 
+    const onProxyError = (event: MessageEvent) => {
+      if (typeof event.data !== "object" || !event.data) return;
+      if (event.data.type !== "proxy_error") return;
+      if (isFigmaTarget) return;
+      setUsingDirectWebsiteFallback(true);
+      setActiveIframeUrl(figmaSourceUrl);
+      setWarning(
+        "Proxy mode failed for this website. Switched to direct website loading. Heatmap scroll coverage may be approximate."
+      );
+    };
+
     document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("message", onMessage);
     window.addEventListener("message", onProxyMetrics);
+    window.addEventListener("message", onProxyError);
 
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("message", onMessage);
       window.removeEventListener("message", onProxyMetrics);
+      window.removeEventListener("message", onProxyError);
     };
-  }, [currentScreenId, stage]);
+  }, [currentScreenId, figmaSourceUrl, isFigmaTarget, stage]);
+
+  useEffect(() => {
+    if (isFigmaTarget || usingDirectWebsiteFallback) return;
+    proxyMetricsSeenRef.current = false;
+    const timeout = window.setTimeout(() => {
+      if (!proxyMetricsSeenRef.current) {
+        setUsingDirectWebsiteFallback(true);
+        setActiveIframeUrl(figmaSourceUrl);
+        setWarning(
+          "Could not read website scroll telemetry in proxy mode. Switched to direct loading; full-page heatmap may be limited."
+        );
+      }
+    }, 4500);
+    return () => window.clearTimeout(timeout);
+  }, [figmaSourceUrl, isFigmaTarget, usingDirectWebsiteFallback]);
 
   useEffect(() => {
     return () => {
@@ -812,7 +850,13 @@ export default function TestRunnerPage({ params }: PageProps) {
         <span>Engine: {engineName ?? "not initialized"}</span>
         <span>Calibration score: {averageCalibrationScore !== null ? `${averageCalibrationScore}/100` : "pending"}</span>
         <span>Email report: {emailStatus}</span>
+        <span>Source mode: {isFigmaTarget ? "figma-embed" : usingDirectWebsiteFallback ? "website-direct" : "website-proxy"}</span>
       </section>
+      {isFigmaTarget && (
+        <p className="warning-banner">
+          Figma embeds are cross-origin, so full internal scroll telemetry is limited. Exported scroll heatmap for Figma is best-effort.
+        </p>
+      )}
 
       {stage === "permission" && <CameraPermissionCard onGranted={onCameraGranted} />}
 
@@ -831,7 +875,13 @@ export default function TestRunnerPage({ params }: PageProps) {
             </div>
           ) : (
             <>
-              <iframe ref={iframeRef} title="Tracked Target" src={iframeUrl} className="prototype-frame" allow="camera; microphone" />
+              <iframe
+                ref={iframeRef}
+                title="Tracked Target"
+                src={activeIframeUrl}
+                className="prototype-frame"
+                allow="camera; microphone"
+              />
               {stage === "running" && <GazeOverlay x={gazePoint?.x ?? 0} y={gazePoint?.y ?? 0} visible={!!gazePoint} />}
               {stage === "finished" && heatmapOverlayPngDataUrl && (
                 <img src={heatmapOverlayPngDataUrl} alt="Heatmap overlay" className="heatmap-overlay" />

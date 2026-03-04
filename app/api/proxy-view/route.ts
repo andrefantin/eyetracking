@@ -66,32 +66,63 @@ function injectTelemetry(html: string): string {
   return `${html}${telemetryScript}`;
 }
 
+function proxyErrorHtml(message: string): string {
+  const safe = message.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return `<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>Proxy Error</title></head>
+  <body style="font-family: ui-sans-serif, system-ui; padding: 20px;">
+    <h3>Proxy could not load this website</h3>
+    <p>${safe}</p>
+    <script>
+      try {
+        parent.postMessage({ type: "proxy_error", message: ${JSON.stringify(message)} }, "*");
+      } catch (e) {}
+    </script>
+  </body>
+</html>`;
+}
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const target = searchParams.get("target")?.trim() || "";
 
   if (!target || !isHttpUrl(target)) {
-    return NextResponse.json({ error: "Invalid target URL" }, { status: 400 });
+    return new NextResponse(proxyErrorHtml("Invalid target URL"), {
+      status: 400,
+      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
+    });
   }
 
   const targetUrl = new URL(target);
 
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+
     const response = await fetch(targetUrl.toString(), {
       headers: {
         "User-Agent": "Mozilla/5.0 (compatible; EyeTrackerProxy/1.0)",
         Accept: "text/html,application/xhtml+xml"
       },
-      redirect: "follow"
+      redirect: "follow",
+      signal: controller.signal
     });
+    clearTimeout(timeout);
 
     if (!response.ok) {
-      return NextResponse.json({ error: `Target fetch failed (${response.status})` }, { status: 502 });
+      return new NextResponse(proxyErrorHtml(`Target fetch failed (${response.status})`), {
+        status: 502,
+        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
+      });
     }
 
     const contentType = response.headers.get("content-type") || "";
     if (!contentType.includes("text/html")) {
-      return NextResponse.json({ error: "Target is not an HTML page" }, { status: 415 });
+      return new NextResponse(proxyErrorHtml("Target is not an HTML page"), {
+        status: 415,
+        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
+      });
     }
 
     const html = await response.text();
@@ -107,6 +138,9 @@ export async function GET(request: Request) {
       }
     });
   } catch {
-    return NextResponse.json({ error: "Proxy error" }, { status: 500 });
+    return new NextResponse(proxyErrorHtml("Proxy error"), {
+      status: 500,
+      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
+    });
   }
 }
