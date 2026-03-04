@@ -130,14 +130,16 @@ function buildHeatmapCanvas(width: number, height: number, samples: ReportSample
 function buildScrollableHeatmapCanvas(
   viewportWidth: number,
   viewportHeight: number,
-  samples: ReportSample[]
+  samples: ReportSample[],
+  fullDocHeight?: number
 ): HTMLCanvasElement {
   const frameSamples = samples.filter(
     (sample) => sample.inFrame && sample.protoX !== undefined && sample.protoY !== undefined
   );
   const width = Math.max(1, Math.floor(viewportWidth));
   const maxY = frameSamples.reduce((acc, sample) => Math.max(acc, sample.protoY as number), viewportHeight);
-  const height = Math.max(1, Math.min(8000, Math.floor(maxY + 120)));
+  const desiredHeight = Math.max(maxY + 120, fullDocHeight ?? 0);
+  const height = Math.max(1, Math.min(12000, Math.floor(desiredHeight)));
 
   const canvas = document.createElement("canvas");
   canvas.width = width;
@@ -317,7 +319,8 @@ export default function TestRunnerPage({ params }: PageProps) {
   const runStartedAtRef = useRef<number | null>(null);
   const reportSamplesRef = useRef<ReportSample[]>([]);
   const pointerPosRef = useRef<{ x: number; y: number } | null>(null);
-  const estimatedScrollYRef = useRef(0);
+  const currentProtoScrollYRef = useRef(0);
+  const maxProtoDocHeightRef = useRef(0);
 
   const figmaSourceUrl = useMemo(() => {
     const targetUrlFromQuery = searchParams.get("targetUrl")?.trim();
@@ -329,6 +332,11 @@ export default function TestRunnerPage({ params }: PageProps) {
     const candidate = figmaSourceUrl;
     return candidate.includes("embed_host") ? candidate : `${candidate}${candidate.includes("?") ? "&" : "?"}embed_host=eye-tracker`;
   }, [figmaSourceUrl]);
+  const isFigmaTarget = useMemo(() => /https?:\/\/(www\.)?figma\.com\/proto\//i.test(figmaSourceUrl), [figmaSourceUrl]);
+  const iframeUrl = useMemo(() => {
+    if (isFigmaTarget) return figmaEmbedUrl;
+    return `/api/proxy-view?target=${encodeURIComponent(figmaSourceUrl)}`;
+  }, [figmaEmbedUrl, figmaSourceUrl, isFigmaTarget]);
 
   const isUsingPlaceholderFigma = figmaEmbedUrl.includes("your-file-id");
 
@@ -414,7 +422,7 @@ export default function TestRunnerPage({ params }: PageProps) {
     const width = Math.max(320, Math.floor(rect?.width ?? window.innerWidth * 0.8));
     const height = Math.max(220, Math.floor(rect?.height ?? window.innerHeight * 0.65));
     const viewportCanvas = buildHeatmapCanvas(width, height, reportSamplesRef.current);
-    const fullCanvas = buildScrollableHeatmapCanvas(width, height, reportSamplesRef.current);
+    const fullCanvas = buildScrollableHeatmapCanvas(width, height, reportSamplesRef.current, maxProtoDocHeightRef.current);
 
     return {
       overlayPngDataUrl: viewportCanvas.toDataURL("image/png"),
@@ -467,10 +475,7 @@ export default function TestRunnerPage({ params }: PageProps) {
     }
 
     const protoX = inFrame && rect && frameNX !== undefined ? frameNX * rect.width : undefined;
-    const protoY =
-      inFrame && rect && frameNY !== undefined
-        ? frameNY * rect.height + Math.max(0, estimatedScrollYRef.current)
-        : undefined;
+    const protoY = inFrame && rect && frameNY !== undefined ? frameNY * rect.height + Math.max(0, currentProtoScrollYRef.current) : undefined;
 
     reportSamplesRef.current.push({
       ts: point.ts,
@@ -678,7 +683,9 @@ export default function TestRunnerPage({ params }: PageProps) {
 
     const addScrollDelta = (deltaY: number) => {
       const capped = clamp(deltaY, -900, 900);
-      estimatedScrollYRef.current = Math.max(0, estimatedScrollYRef.current + capped);
+      if (isFigmaTarget) {
+        currentProtoScrollYRef.current = Math.max(0, currentProtoScrollYRef.current + capped);
+      }
     };
 
     const onWheel = (event: WheelEvent) => {
@@ -697,10 +704,14 @@ export default function TestRunnerPage({ params }: PageProps) {
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (stage !== "running") return;
-      if (event.key === "PageDown") addScrollDelta(window.innerHeight * 0.9);
-      if (event.key === "PageUp") addScrollDelta(-window.innerHeight * 0.9);
-      if (event.key === "ArrowDown") addScrollDelta(120);
-      if (event.key === "ArrowUp") addScrollDelta(-120);
+      let delta = 0;
+      if (event.key === "PageDown") delta = window.innerHeight * 0.9;
+      if (event.key === "PageUp") delta = -window.innerHeight * 0.9;
+      if (event.key === "ArrowDown") delta = 120;
+      if (event.key === "ArrowUp") delta = -120;
+      if (delta !== 0) {
+        addScrollDelta(delta);
+      }
     };
 
     window.addEventListener("mousemove", onMouseMove);
@@ -721,7 +732,7 @@ export default function TestRunnerPage({ params }: PageProps) {
       iframeElement?.removeEventListener("wheel", onWheel, true);
       shellElement?.removeEventListener("wheel", onWheel, true);
     };
-  }, [stage]);
+  }, [isFigmaTarget, stage]);
 
   useEffect(() => {
     const onVisibilityChange = () => {
@@ -745,12 +756,27 @@ export default function TestRunnerPage({ params }: PageProps) {
       setCurrentScreenId(nextScreen);
     };
 
+    const onProxyMetrics = (event: MessageEvent) => {
+      if (typeof event.data !== "object" || !event.data) return;
+      if (event.data.type !== "proxy_metrics") return;
+      const scrollY = Number(event.data.scrollY);
+      const docHeight = Number(event.data.docHeight);
+      if (Number.isFinite(scrollY)) {
+        currentProtoScrollYRef.current = Math.max(0, scrollY);
+      }
+      if (Number.isFinite(docHeight)) {
+        maxProtoDocHeightRef.current = Math.max(maxProtoDocHeightRef.current, docHeight);
+      }
+    };
+
     document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("message", onMessage);
+    window.addEventListener("message", onProxyMetrics);
 
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("message", onMessage);
+      window.removeEventListener("message", onProxyMetrics);
     };
   }, [currentScreenId, stage]);
 
@@ -805,7 +831,7 @@ export default function TestRunnerPage({ params }: PageProps) {
             </div>
           ) : (
             <>
-              <iframe ref={iframeRef} title="Figma Prototype" src={figmaEmbedUrl} className="prototype-frame" allow="camera; microphone" />
+              <iframe ref={iframeRef} title="Tracked Target" src={iframeUrl} className="prototype-frame" allow="camera; microphone" />
               {stage === "running" && <GazeOverlay x={gazePoint?.x ?? 0} y={gazePoint?.y ?? 0} visible={!!gazePoint} />}
               {stage === "finished" && heatmapOverlayPngDataUrl && (
                 <img src={heatmapOverlayPngDataUrl} alt="Heatmap overlay" className="heatmap-overlay" />

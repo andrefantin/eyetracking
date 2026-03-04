@@ -66,6 +66,8 @@ You can pass setup values directly in the URL:
 - `/test/<sessionToken>?targetUrl=https%3A%2F%2Fwww.figma.com%2Fproto%2F...`
 - both can be combined.
 
+For non-Figma websites, the app uses a same-origin proxy route (`/api/proxy-view`) so scroll telemetry can be captured for full-page heatmaps.
+
 ## Notes
 
 - MediaPipe Face Mesh script is loaded from CDN at runtime.
