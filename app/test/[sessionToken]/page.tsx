@@ -44,6 +44,13 @@ type ReportSample = {
   protoY?: number;
 };
 
+type ScrollTelemetry = {
+  ts: number;
+  scrollY: number;
+  docHeight: number;
+  viewportHeight: number;
+};
+
 type EmailStatus = "idle" | "sending" | "sent" | "skipped" | "error";
 
 const BATCH_INTERVAL_MS = 750;
@@ -139,7 +146,9 @@ function buildScrollableHeatmapCanvas(
   const width = Math.max(1, Math.floor(viewportWidth));
   const maxY = frameSamples.reduce((acc, sample) => Math.max(acc, sample.protoY as number), viewportHeight);
   const desiredHeight = Math.max(maxY + 120, fullDocHeight ?? 0);
-  const height = Math.max(1, Math.min(12000, Math.floor(desiredHeight)));
+  const maxCanvasHeight = 16000;
+  const scaleY = desiredHeight > maxCanvasHeight ? desiredHeight / maxCanvasHeight : 1;
+  const height = Math.max(1, Math.floor(desiredHeight / scaleY));
 
   const canvas = document.createElement("canvas");
   canvas.width = width;
@@ -153,10 +162,10 @@ function buildScrollableHeatmapCanvas(
   const actx = accumulation.getContext("2d");
   if (!actx) return canvas;
 
-  const radius = Math.max(28, Math.round(Math.min(width, viewportHeight) * 0.05));
+  const radius = Math.max(20, Math.round(Math.min(width, viewportHeight / scaleY) * 0.05));
   for (const sample of frameSamples) {
     const x = clamp(sample.protoX as number, 0, width);
-    const y = clamp(sample.protoY as number, 0, height);
+    const y = clamp((sample.protoY as number) / scaleY, 0, height);
     const gradient = actx.createRadialGradient(x, y, 0, x, y, radius);
     const strength = clamp(0.05 + sample.confidence * 0.12, 0.04, 0.18);
     gradient.addColorStop(0, `rgba(255,255,255,${strength})`);
@@ -321,8 +330,11 @@ export default function TestRunnerPage({ params }: PageProps) {
   const reportSamplesRef = useRef<ReportSample[]>([]);
   const pointerPosRef = useRef<{ x: number; y: number } | null>(null);
   const currentProtoScrollYRef = useRef(0);
+  const maxProtoScrollYRef = useRef(0);
   const maxProtoDocHeightRef = useRef(0);
   const proxyMetricsSeenRef = useRef(false);
+  const telemetryHistoryRef = useRef<ScrollTelemetry[]>([]);
+  const latestTelemetryRef = useRef<ScrollTelemetry | null>(null);
 
   const figmaSourceUrl = useMemo(() => {
     const targetUrlFromQuery = searchParams.get("targetUrl")?.trim();
@@ -430,14 +442,53 @@ export default function TestRunnerPage({ params }: PageProps) {
     const rect = frameElement?.getBoundingClientRect();
     const width = Math.max(320, Math.floor(rect?.width ?? window.innerWidth * 0.8));
     const height = Math.max(220, Math.floor(rect?.height ?? window.innerHeight * 0.65));
+    const telemetryViewportHeight = latestTelemetryRef.current?.viewportHeight ?? height;
+    const derivedDocHeight = Math.max(
+      maxProtoDocHeightRef.current,
+      maxProtoScrollYRef.current + telemetryViewportHeight,
+      height
+    );
     const viewportCanvas = buildHeatmapCanvas(width, height, reportSamplesRef.current);
-    const fullCanvas = buildScrollableHeatmapCanvas(width, height, reportSamplesRef.current, maxProtoDocHeightRef.current);
+    const fullCanvas = buildScrollableHeatmapCanvas(width, height, reportSamplesRef.current, derivedDocHeight);
 
     return {
       overlayPngDataUrl: viewportCanvas.toDataURL("image/png"),
       pngDataUrl: fullCanvas.toDataURL("image/png"),
       jpgDataUrl: fullCanvas.toDataURL("image/jpeg", 0.9)
     };
+  };
+
+  const recordTelemetry = (entry: ScrollTelemetry) => {
+    latestTelemetryRef.current = entry;
+    telemetryHistoryRef.current.push(entry);
+    if (telemetryHistoryRef.current.length > 3000) {
+      telemetryHistoryRef.current = telemetryHistoryRef.current.slice(-3000);
+    }
+    currentProtoScrollYRef.current = Math.max(0, entry.scrollY);
+    maxProtoScrollYRef.current = Math.max(maxProtoScrollYRef.current, currentProtoScrollYRef.current);
+    maxProtoDocHeightRef.current = Math.max(maxProtoDocHeightRef.current, entry.docHeight);
+  };
+
+  const getScrollOffsetForTimestamp = (ts: number): number => {
+    const history = telemetryHistoryRef.current;
+    if (history.length === 0) {
+      return Math.max(0, currentProtoScrollYRef.current);
+    }
+
+    // Find closest telemetry sample at or before gaze timestamp.
+    let candidate = history[0];
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      if (history[i].ts <= ts) {
+        candidate = history[i];
+        return Math.max(0, candidate.scrollY);
+      }
+    }
+
+    // If none is older, use the closest by absolute time.
+    candidate = history.reduce((best, next) =>
+      Math.abs(next.ts - ts) < Math.abs(best.ts - ts) ? next : best
+    );
+    return Math.max(0, candidate.scrollY);
   };
 
   const sendEmailReport = async (report: SessionReport, pngDataUrl: string | null, jpgDataUrl: string | null) => {
@@ -483,8 +534,9 @@ export default function TestRunnerPage({ params }: PageProps) {
       }
     }
 
+    const scrollOffsetY = getScrollOffsetForTimestamp(point.ts);
     const protoX = inFrame && rect && frameNX !== undefined ? frameNX * rect.width : undefined;
-    const protoY = inFrame && rect && frameNY !== undefined ? frameNY * rect.height + Math.max(0, currentProtoScrollYRef.current) : undefined;
+    const protoY = inFrame && rect && frameNY !== undefined ? frameNY * rect.height + scrollOffsetY : undefined;
 
     reportSamplesRef.current.push({
       ts: point.ts,
@@ -552,6 +604,12 @@ export default function TestRunnerPage({ params }: PageProps) {
 
   const onCameraGranted = async (stream: MediaStream) => {
     streamRef.current = stream;
+    reportSamplesRef.current = [];
+    telemetryHistoryRef.current = [];
+    latestTelemetryRef.current = null;
+    currentProtoScrollYRef.current = 0;
+    maxProtoScrollYRef.current = 0;
+    maxProtoDocHeightRef.current = 0;
     setStage("calibration");
     setStatus("Camera enabled. Starting eye-tracker...");
 
@@ -693,7 +751,13 @@ export default function TestRunnerPage({ params }: PageProps) {
     const addScrollDelta = (deltaY: number) => {
       const capped = clamp(deltaY, -900, 900);
       if (isFigmaTarget) {
-        currentProtoScrollYRef.current = Math.max(0, currentProtoScrollYRef.current + capped);
+        const next = Math.max(0, currentProtoScrollYRef.current + capped);
+        recordTelemetry({
+          ts: Date.now(),
+          scrollY: next,
+          docHeight: Math.max(maxProtoDocHeightRef.current, next + window.innerHeight),
+          viewportHeight: window.innerHeight
+        });
       }
     };
 
@@ -771,11 +835,14 @@ export default function TestRunnerPage({ params }: PageProps) {
       proxyMetricsSeenRef.current = true;
       const scrollY = Number(event.data.scrollY);
       const docHeight = Number(event.data.docHeight);
+      const viewportHeight = Number(event.data.viewportHeight);
       if (Number.isFinite(scrollY)) {
-        currentProtoScrollYRef.current = Math.max(0, scrollY);
-      }
-      if (Number.isFinite(docHeight)) {
-        maxProtoDocHeightRef.current = Math.max(maxProtoDocHeightRef.current, docHeight);
+        recordTelemetry({
+          ts: Date.now(),
+          scrollY: Math.max(0, scrollY),
+          docHeight: Number.isFinite(docHeight) ? Math.max(docHeight, scrollY + 1) : Math.max(maxProtoDocHeightRef.current, scrollY + 1),
+          viewportHeight: Number.isFinite(viewportHeight) && viewportHeight > 0 ? viewportHeight : window.innerHeight
+        });
       }
     };
 

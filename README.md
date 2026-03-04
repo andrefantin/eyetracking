@@ -67,6 +67,7 @@ You can pass setup values directly in the URL:
 - both can be combined.
 
 For non-Figma websites, the app uses a same-origin proxy route (`/api/proxy-view`) so scroll telemetry can be captured for full-page heatmaps.
+If proxy telemetry fails, the UI falls back to direct website mode; in that fallback, full-page scroll heatmaps may be limited.
 
 ## Notes
 

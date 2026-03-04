@@ -10,6 +10,11 @@ function isHttpUrl(value: string): boolean {
 }
 
 function injectTelemetry(html: string): string {
+  // Remove CSP meta tags so injected telemetry script can run in proxied document.
+  const sanitizedHtml = html.replace(
+    /<meta[^>]+http-equiv=["']?content-security-policy["']?[^>]*>/gi,
+    ""
+  );
   const telemetryScript = `
 <script>
 (function () {
@@ -60,10 +65,10 @@ function injectTelemetry(html: string): string {
 })();
 </script>`;
 
-  if (html.includes("</body>")) {
-    return html.replace("</body>", `${telemetryScript}</body>`);
+  if (sanitizedHtml.includes("</body>")) {
+    return sanitizedHtml.replace("</body>", `${telemetryScript}</body>`);
   }
-  return `${html}${telemetryScript}`;
+  return `${sanitizedHtml}${telemetryScript}`;
 }
 
 function proxyErrorHtml(message: string): string {
