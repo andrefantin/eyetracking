@@ -40,6 +40,8 @@ type ReportSample = {
   inFrame: boolean;
   frameNX?: number;
   frameNY?: number;
+  protoX?: number;
+  protoY?: number;
 };
 
 type EmailStatus = "idle" | "sending" | "sent" | "skipped" | "error";
@@ -125,6 +127,63 @@ function buildHeatmapCanvas(width: number, height: number, samples: ReportSample
   return canvas;
 }
 
+function buildScrollableHeatmapCanvas(
+  viewportWidth: number,
+  viewportHeight: number,
+  samples: ReportSample[]
+): HTMLCanvasElement {
+  const frameSamples = samples.filter(
+    (sample) => sample.inFrame && sample.protoX !== undefined && sample.protoY !== undefined
+  );
+  const width = Math.max(1, Math.floor(viewportWidth));
+  const maxY = frameSamples.reduce((acc, sample) => Math.max(acc, sample.protoY as number), viewportHeight);
+  const height = Math.max(1, Math.min(8000, Math.floor(maxY + 120)));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return canvas;
+
+  const accumulation = document.createElement("canvas");
+  accumulation.width = width;
+  accumulation.height = height;
+  const actx = accumulation.getContext("2d");
+  if (!actx) return canvas;
+
+  const radius = Math.max(28, Math.round(Math.min(width, viewportHeight) * 0.05));
+  for (const sample of frameSamples) {
+    const x = clamp(sample.protoX as number, 0, width);
+    const y = clamp(sample.protoY as number, 0, height);
+    const gradient = actx.createRadialGradient(x, y, 0, x, y, radius);
+    const strength = clamp(0.05 + sample.confidence * 0.12, 0.04, 0.18);
+    gradient.addColorStop(0, `rgba(255,255,255,${strength})`);
+    gradient.addColorStop(1, "rgba(255,255,255,0)");
+    actx.fillStyle = gradient;
+    actx.beginPath();
+    actx.arc(x, y, radius, 0, Math.PI * 2);
+    actx.fill();
+  }
+
+  const image = actx.getImageData(0, 0, width, height);
+  const data = image.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const intensity = data[i + 3] / 255;
+    if (intensity < 0.02) {
+      data[i + 3] = 0;
+      continue;
+    }
+    const [r, g, b, a] = heatColor(Math.min(1, intensity * 1.9));
+    data[i] = r;
+    data[i + 1] = g;
+    data[i + 2] = b;
+    data[i + 3] = Math.round(a * 255);
+  }
+
+  ctx.putImageData(image, 0, 0);
+  return canvas;
+}
+
 function getBrowserHint(): string {
   const ua = navigator.userAgent.toLowerCase();
   const insecureContext = window.location.protocol !== "https:" && window.location.hostname !== "localhost";
@@ -138,6 +197,90 @@ function getBrowserHint(): string {
     return "Firefox support can be unstable for webcam landmark tracking. Use latest Chrome for best results.";
   }
   return "Ensure camera permission is allowed for this site and retry.";
+}
+
+async function buildPdfDataUrl(options: {
+  sessionToken: string;
+  participantName: string;
+  figmaUrl: string;
+  summary: SessionReport;
+  heatmapPngDataUrl: string | null;
+}): Promise<string | null> {
+  try {
+    const jsPdfModule = await import("jspdf");
+    const JsPdfCtor = jsPdfModule.jsPDF;
+    const doc = new JsPdfCtor({
+      orientation: "portrait",
+      unit: "pt",
+      format: "a4"
+    });
+
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 36;
+    let y = margin;
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(16);
+    doc.text("Eye Tracking Session Report", margin, y);
+    y += 24;
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(11);
+    const lines = [
+      `Session ID: ${options.sessionToken}`,
+      `Participant: ${options.participantName || "N/A"}`,
+      `Figma URL: ${options.figmaUrl}`,
+      `Total gaze samples: ${options.summary.totalSamples}`,
+      `Average confidence: ${options.summary.avgConfidence}`,
+      `Duration: ${options.summary.durationSec}s`
+    ];
+    for (const line of lines) {
+      const wrapped = doc.splitTextToSize(line, pageWidth - margin * 2);
+      doc.text(wrapped, margin, y);
+      y += 16 + (wrapped.length - 1) * 12;
+    }
+
+    y += 8;
+    doc.setFont("helvetica", "bold");
+    doc.text("Top viewed screens", margin, y);
+    y += 16;
+    doc.setFont("helvetica", "normal");
+    if (options.summary.topScreens.length === 0) {
+      doc.text("- No screen data collected", margin, y);
+      y += 16;
+    } else {
+      for (const entry of options.summary.topScreens) {
+        doc.text(`- ${entry.screenId}: ${entry.samples} samples`, margin, y);
+        y += 14;
+      }
+    }
+
+    if (options.heatmapPngDataUrl) {
+      y += 14;
+      doc.setFont("helvetica", "bold");
+      doc.text("Heatmap", margin, y);
+      y += 10;
+
+      const imgProps = doc.getImageProperties(options.heatmapPngDataUrl);
+      const maxWidth = pageWidth - margin * 2;
+      const maxHeight = 320;
+      const widthRatio = maxWidth / imgProps.width;
+      const heightRatio = maxHeight / imgProps.height;
+      const ratio = Math.min(widthRatio, heightRatio);
+      const imgWidth = imgProps.width * ratio;
+      const imgHeight = imgProps.height * ratio;
+
+      if (y + imgHeight > doc.internal.pageSize.getHeight() - margin) {
+        doc.addPage();
+        y = margin;
+      }
+      doc.addImage(options.heatmapPngDataUrl, "PNG", margin, y, imgWidth, imgHeight);
+    }
+
+    return doc.output("datauristring");
+  } catch {
+    return null;
+  }
 }
 
 export default function TestRunnerPage({ params }: PageProps) {
@@ -154,8 +297,10 @@ export default function TestRunnerPage({ params }: PageProps) {
   const [engineName, setEngineName] = useState<"mediapipe" | "pointer-fallback" | null>(null);
   const [calibrationScores, setCalibrationScores] = useState<number[]>([]);
   const [sessionReport, setSessionReport] = useState<SessionReport | null>(null);
+  const [heatmapOverlayPngDataUrl, setHeatmapOverlayPngDataUrl] = useState<string | null>(null);
   const [heatmapPngDataUrl, setHeatmapPngDataUrl] = useState<string | null>(null);
   const [heatmapJpgDataUrl, setHeatmapJpgDataUrl] = useState<string | null>(null);
+  const [reportPdfDataUrl, setReportPdfDataUrl] = useState<string | null>(null);
   const [emailStatus, setEmailStatus] = useState<EmailStatus>("idle");
 
   const participantName = searchParams.get("participant")?.trim() ?? "";
@@ -170,6 +315,8 @@ export default function TestRunnerPage({ params }: PageProps) {
   const calibrationRetryRef = useRef<Record<number, number>>({});
   const runStartedAtRef = useRef<number | null>(null);
   const reportSamplesRef = useRef<ReportSample[]>([]);
+  const pointerPosRef = useRef<{ x: number; y: number } | null>(null);
+  const estimatedScrollYRef = useRef(0);
 
   const figmaSourceUrl = useMemo(() => {
     const figmaUrlFromQuery = searchParams.get("figmaUrl")?.trim();
@@ -264,11 +411,13 @@ export default function TestRunnerPage({ params }: PageProps) {
     const rect = frameElement?.getBoundingClientRect();
     const width = Math.max(320, Math.floor(rect?.width ?? window.innerWidth * 0.8));
     const height = Math.max(220, Math.floor(rect?.height ?? window.innerHeight * 0.65));
-    const canvas = buildHeatmapCanvas(width, height, reportSamplesRef.current);
+    const viewportCanvas = buildHeatmapCanvas(width, height, reportSamplesRef.current);
+    const fullCanvas = buildScrollableHeatmapCanvas(width, height, reportSamplesRef.current);
 
     return {
-      pngDataUrl: canvas.toDataURL("image/png"),
-      jpgDataUrl: canvas.toDataURL("image/jpeg", 0.9)
+      overlayPngDataUrl: viewportCanvas.toDataURL("image/png"),
+      pngDataUrl: fullCanvas.toDataURL("image/png"),
+      jpgDataUrl: fullCanvas.toDataURL("image/jpeg", 0.9)
     };
   };
 
@@ -315,6 +464,12 @@ export default function TestRunnerPage({ params }: PageProps) {
       }
     }
 
+    const protoX = inFrame && rect && frameNX !== undefined ? frameNX * rect.width : undefined;
+    const protoY =
+      inFrame && rect && frameNY !== undefined
+        ? frameNY * rect.height + Math.max(0, estimatedScrollYRef.current)
+        : undefined;
+
     reportSamplesRef.current.push({
       ts: point.ts,
       confidence: point.confidence,
@@ -323,7 +478,9 @@ export default function TestRunnerPage({ params }: PageProps) {
       y: point.y,
       inFrame,
       frameNX,
-      frameNY
+      frameNY,
+      protoX,
+      protoY
     });
 
     if (reportSamplesRef.current.length > 100000) {
@@ -480,8 +637,17 @@ export default function TestRunnerPage({ params }: PageProps) {
     const report = buildSessionReport();
     setSessionReport(report);
     const artifacts = generateHeatmapArtifacts();
+    setHeatmapOverlayPngDataUrl(artifacts.overlayPngDataUrl);
     setHeatmapPngDataUrl(artifacts.pngDataUrl);
     setHeatmapJpgDataUrl(artifacts.jpgDataUrl);
+    const pdfDataUrl = await buildPdfDataUrl({
+      sessionToken,
+      participantName,
+      figmaUrl: figmaSourceUrl,
+      summary: report,
+      heatmapPngDataUrl: artifacts.pngDataUrl
+    });
+    setReportPdfDataUrl(pdfDataUrl);
 
     setStage("finished");
     setStatus("Session complete.");
@@ -502,6 +668,34 @@ export default function TestRunnerPage({ params }: PageProps) {
   useEffect(() => {
     currentScreenIdRef.current = currentScreenId;
   }, [currentScreenId]);
+
+  useEffect(() => {
+    const onMouseMove = (event: MouseEvent) => {
+      pointerPosRef.current = { x: event.clientX, y: event.clientY };
+    };
+
+    const onWheel = (event: WheelEvent) => {
+      if (stage !== "running") return;
+      const pointer = pointerPosRef.current;
+      const rect = iframeRef.current?.getBoundingClientRect();
+      if (!pointer || !rect) return;
+      const inside =
+        pointer.x >= rect.left &&
+        pointer.x <= rect.right &&
+        pointer.y >= rect.top &&
+        pointer.y <= rect.bottom;
+      if (!inside) return;
+      estimatedScrollYRef.current = Math.max(0, estimatedScrollYRef.current + event.deltaY);
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("wheel", onWheel, { passive: true });
+
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("wheel", onWheel);
+    };
+  }, [stage]);
 
   useEffect(() => {
     const onVisibilityChange = () => {
@@ -582,8 +776,8 @@ export default function TestRunnerPage({ params }: PageProps) {
             <>
               <iframe ref={iframeRef} title="Figma Prototype" src={figmaEmbedUrl} className="prototype-frame" allow="camera; microphone" />
               {stage === "running" && <GazeOverlay x={gazePoint?.x ?? 0} y={gazePoint?.y ?? 0} visible={!!gazePoint} />}
-              {stage === "finished" && heatmapPngDataUrl && (
-                <img src={heatmapPngDataUrl} alt="Heatmap overlay" className="heatmap-overlay" />
+              {stage === "finished" && heatmapOverlayPngDataUrl && (
+                <img src={heatmapOverlayPngDataUrl} alt="Heatmap overlay" className="heatmap-overlay" />
               )}
             </>
           )}
@@ -626,6 +820,17 @@ export default function TestRunnerPage({ params }: PageProps) {
             ))}
           </ul>
           <div className="report-actions">
+            <span>Downloads include the full-session scroll heatmap.</span>
+            {heatmapPngDataUrl && (
+              <a href={heatmapPngDataUrl} target="_blank" rel="noreferrer" className="report-download-link">
+                Open Full Heatmap
+              </a>
+            )}
+            {reportPdfDataUrl && (
+              <a href={reportPdfDataUrl} download={`${sessionToken}-report.pdf`} className="report-download-link">
+                Download PDF
+              </a>
+            )}
             {heatmapPngDataUrl ? (
               <a href={heatmapPngDataUrl} download={`${sessionToken}-heatmap.png`} className="report-download-link">
                 Download PNG
@@ -652,6 +857,11 @@ export default function TestRunnerPage({ params }: PageProps) {
           {stage === "finished" && heatmapPngDataUrl && (
             <a href={heatmapPngDataUrl} download={`${sessionToken}-heatmap.png`} className="report-download-link">
               Download PNG
+            </a>
+          )}
+          {stage === "finished" && reportPdfDataUrl && (
+            <a href={reportPdfDataUrl} download={`${sessionToken}-report.pdf`} className="report-download-link">
+              Download PDF
             </a>
           )}
           {stage === "finished" && heatmapJpgDataUrl && (

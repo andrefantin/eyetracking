@@ -72,4 +72,5 @@ You can pass setup values directly in the URL:
 - If MediaPipe fails to initialize, the app falls back to pointer tracking so the flow still works.
 - Figma navigation events are expected through `window.postMessage` with `type: "figma_navigation"`.
 - On test end, the app generates a local heatmap overlay and allows PNG/JPG download.
+- On test end, the app also generates a downloadable PDF report (summary + heatmap + metadata).
 - Email sending requires Resend env vars; without them, status will show as skipped.
