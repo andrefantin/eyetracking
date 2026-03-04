@@ -202,7 +202,7 @@ function getBrowserHint(): string {
 async function buildPdfDataUrl(options: {
   sessionToken: string;
   participantName: string;
-  figmaUrl: string;
+  targetUrl: string;
   summary: SessionReport;
   heatmapPngDataUrl: string | null;
 }): Promise<string | null> {
@@ -229,7 +229,7 @@ async function buildPdfDataUrl(options: {
     const lines = [
       `Session ID: ${options.sessionToken}`,
       `Participant: ${options.participantName || "N/A"}`,
-      `Figma URL: ${options.figmaUrl}`,
+      `Target URL: ${options.targetUrl}`,
       `Total gaze samples: ${options.summary.totalSamples}`,
       `Average confidence: ${options.summary.avgConfidence}`,
       `Duration: ${options.summary.durationSec}s`
@@ -310,6 +310,7 @@ export default function TestRunnerPage({ params }: PageProps) {
   const bufferRef = useRef<TrackingEvent[]>([]);
   const flushTimerRef = useRef<number | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const prototypeShellRef = useRef<HTMLElement | null>(null);
   const currentScreenIdRef = useRef(currentScreenId);
   const latestGazePointRef = useRef<GazePoint | null>(null);
   const calibrationRetryRef = useRef<Record<number, number>>({});
@@ -319,8 +320,9 @@ export default function TestRunnerPage({ params }: PageProps) {
   const estimatedScrollYRef = useRef(0);
 
   const figmaSourceUrl = useMemo(() => {
-    const figmaUrlFromQuery = searchParams.get("figmaUrl")?.trim();
-    return figmaUrlFromQuery || process.env.NEXT_PUBLIC_FIGMA_EMBED_URL || FIGMA_URL_PLACEHOLDER;
+    const targetUrlFromQuery = searchParams.get("targetUrl")?.trim();
+    const backwardCompatFigmaUrl = searchParams.get("figmaUrl")?.trim();
+    return targetUrlFromQuery || backwardCompatFigmaUrl || process.env.NEXT_PUBLIC_FIGMA_EMBED_URL || FIGMA_URL_PLACEHOLDER;
   }, [searchParams]);
 
   const figmaEmbedUrl = useMemo(() => {
@@ -643,7 +645,7 @@ export default function TestRunnerPage({ params }: PageProps) {
     const pdfDataUrl = await buildPdfDataUrl({
       sessionToken,
       participantName,
-      figmaUrl: figmaSourceUrl,
+      targetUrl: figmaSourceUrl,
       summary: report,
       heatmapPngDataUrl: artifacts.pngDataUrl
     });
@@ -674,10 +676,15 @@ export default function TestRunnerPage({ params }: PageProps) {
       pointerPosRef.current = { x: event.clientX, y: event.clientY };
     };
 
+    const addScrollDelta = (deltaY: number) => {
+      const capped = clamp(deltaY, -900, 900);
+      estimatedScrollYRef.current = Math.max(0, estimatedScrollYRef.current + capped);
+    };
+
     const onWheel = (event: WheelEvent) => {
       if (stage !== "running") return;
       const pointer = pointerPosRef.current;
-      const rect = iframeRef.current?.getBoundingClientRect();
+      const rect = prototypeShellRef.current?.getBoundingClientRect() ?? iframeRef.current?.getBoundingClientRect();
       if (!pointer || !rect) return;
       const inside =
         pointer.x >= rect.left &&
@@ -685,15 +692,34 @@ export default function TestRunnerPage({ params }: PageProps) {
         pointer.y >= rect.top &&
         pointer.y <= rect.bottom;
       if (!inside) return;
-      estimatedScrollYRef.current = Math.max(0, estimatedScrollYRef.current + event.deltaY);
+      addScrollDelta(event.deltaY);
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (stage !== "running") return;
+      if (event.key === "PageDown") addScrollDelta(window.innerHeight * 0.9);
+      if (event.key === "PageUp") addScrollDelta(-window.innerHeight * 0.9);
+      if (event.key === "ArrowDown") addScrollDelta(120);
+      if (event.key === "ArrowUp") addScrollDelta(-120);
     };
 
     window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("wheel", onWheel, { passive: true });
+    window.addEventListener("wheel", onWheel, { passive: true, capture: true });
+    document.addEventListener("wheel", onWheel, { passive: true, capture: true });
+    window.addEventListener("keydown", onKeyDown);
+
+    const iframeElement = iframeRef.current;
+    const shellElement = prototypeShellRef.current;
+    iframeElement?.addEventListener("wheel", onWheel, { passive: true, capture: true });
+    shellElement?.addEventListener("wheel", onWheel, { passive: true, capture: true });
 
     return () => {
       window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("wheel", onWheel);
+      window.removeEventListener("wheel", onWheel, true);
+      document.removeEventListener("wheel", onWheel, true);
+      window.removeEventListener("keydown", onKeyDown);
+      iframeElement?.removeEventListener("wheel", onWheel, true);
+      shellElement?.removeEventListener("wheel", onWheel, true);
     };
   }, [stage]);
 
@@ -752,7 +778,7 @@ export default function TestRunnerPage({ params }: PageProps) {
       {warning && <p className="warning-banner">{warning}</p>}
       {isUsingPlaceholderFigma && (
         <p className="error-banner">
-          No Figma prototype URL detected. Go back to the home page and paste a real `https://www.figma.com/proto/...` link.
+          No target URL detected. Go back to the home page and paste a website or Figma prototype link.
         </p>
       )}
 
@@ -765,7 +791,12 @@ export default function TestRunnerPage({ params }: PageProps) {
       {stage === "permission" && <CameraPermissionCard onGranted={onCameraGranted} />}
 
       {stage !== "permission" && (
-        <section className="prototype-shell">
+        <section
+          className="prototype-shell"
+          ref={(node) => {
+            prototypeShellRef.current = node;
+          }}
+        >
           {stage === "calibration" ? (
             <div className="calibration-shell">
               <h2>Calibration</h2>
@@ -797,7 +828,7 @@ export default function TestRunnerPage({ params }: PageProps) {
             <strong>Participant:</strong> {participantName || "N/A"}
           </p>
           <p>
-            <strong>Figma URL:</strong> {figmaSourceUrl}
+            <strong>Target URL:</strong> {figmaSourceUrl}
           </p>
           <p>
             <strong>Total gaze samples:</strong> {sessionReport.totalSamples}

@@ -67,7 +67,7 @@ export async function POST(request: Request) {
       <h2>Eye Tracking Session Report</h2>
       <p><strong>Session ID:</strong> ${body.sessionToken}</p>
       <p><strong>Participant:</strong> ${body.participantName || "N/A"}</p>
-      <p><strong>Figma Link:</strong> <a href="${body.figmaUrl}">${body.figmaUrl}</a></p>
+      <p><strong>Target URL:</strong> <a href="${body.figmaUrl}">${body.figmaUrl}</a></p>
       <h3>Summary</h3>
       <p><strong>Total samples:</strong> ${body.summary.totalSamples}</p>
       <p><strong>Average confidence:</strong> ${body.summary.avgConfidence}</p>

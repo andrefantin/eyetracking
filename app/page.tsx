@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
-const figmaUrlPattern = /^https:\/\/(www\.)?figma\.com\/proto\/.+/i;
+const httpUrlPattern = /^https?:\/\/.+/i;
 
 function makeSessionToken(participant: string): string {
   const base = participant
@@ -22,7 +22,7 @@ function makeSessionToken(participant: string): string {
 export default function HomePage() {
   const router = useRouter();
   const [participant, setParticipant] = useState("");
-  const [figmaUrl, setFigmaUrl] = useState("");
+  const [targetUrl, setTargetUrl] = useState("");
   const [token, setToken] = useState("demo-token");
   const [error, setError] = useState<string | null>(null);
 
@@ -30,7 +30,7 @@ export default function HomePage() {
 
   const openSession = (useGeneratedToken: boolean) => {
     const chosenToken = (useGeneratedToken ? generatedToken : token).trim();
-    const trimmedFigmaUrl = figmaUrl.trim();
+    const trimmedTargetUrl = targetUrl.trim();
     const trimmedParticipant = participant.trim();
 
     if (!chosenToken) {
@@ -38,14 +38,14 @@ export default function HomePage() {
       return;
     }
 
-    if (trimmedFigmaUrl.length > 0 && !figmaUrlPattern.test(trimmedFigmaUrl)) {
-      setError("Please paste a valid Figma prototype URL (https://www.figma.com/proto/...).");
+    if (trimmedTargetUrl.length > 0 && !httpUrlPattern.test(trimmedTargetUrl)) {
+      setError("Please paste a valid URL (https://...). It can be a website or Figma prototype.");
       return;
     }
 
     setError(null);
     const query = new URLSearchParams();
-    if (trimmedFigmaUrl) query.set("figmaUrl", trimmedFigmaUrl);
+    if (trimmedTargetUrl) query.set("targetUrl", trimmedTargetUrl);
     if (trimmedParticipant) query.set("participant", trimmedParticipant);
     const queryString = query.toString();
 
@@ -83,11 +83,11 @@ export default function HomePage() {
         </label>
 
         <label style={{ display: "grid", gap: 6 }}>
-          <span>Figma prototype URL (optional)</span>
+          <span>Prototype or website URL (optional)</span>
           <input
-            value={figmaUrl}
-            onChange={(event) => setFigmaUrl(event.target.value)}
-            placeholder="https://www.figma.com/proto/..."
+            value={targetUrl}
+            onChange={(event) => setTargetUrl(event.target.value)}
+            placeholder="https://www.figma.com/proto/... or https://example.com"
             style={{
               padding: "10px 12px",
               borderRadius: 8,

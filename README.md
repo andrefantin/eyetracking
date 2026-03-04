@@ -7,7 +7,7 @@ This is a Next.js app you can deploy directly to Vercel.
 - Route: `/test/[sessionToken]`
 - Friendly session setup on `/`:
   - participant name
-  - per-session Figma prototype URL
+  - per-session target URL (website or Figma prototype)
   - auto-generated session token
 - Camera permission prompt
 - 9-point calibration overlay
@@ -36,7 +36,7 @@ This is a Next.js app you can deploy directly to Vercel.
 2. In Vercel, click **New Project** and import that repo.
 3. Framework preset should auto-detect as **Next.js**.
 4. Add env var in Vercel project settings:
-   - `NEXT_PUBLIC_FIGMA_EMBED_URL` = your Figma prototype URL
+   - `NEXT_PUBLIC_FIGMA_EMBED_URL` = default target URL (website or Figma prototype)
    - `RESEND_API_KEY` = your Resend API key (for report emails)
    - `REPORT_EMAIL_TO` = `andre.goncalves@allhuman.com`
    - `REPORT_EMAIL_FROM` = verified sender, e.g. `Eye Tracker <reports@yourdomain.com>`
@@ -63,7 +63,7 @@ This client emits `calibration_result` events in addition to gaze/navigation/ses
 You can pass setup values directly in the URL:
 
 - `/test/<sessionToken>?participant=Participant%2001`
-- `/test/<sessionToken>?figmaUrl=https%3A%2F%2Fwww.figma.com%2Fproto%2F...`
+- `/test/<sessionToken>?targetUrl=https%3A%2F%2Fwww.figma.com%2Fproto%2F...`
 - both can be combined.
 
 ## Notes
