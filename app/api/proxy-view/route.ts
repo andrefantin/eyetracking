@@ -30,6 +30,28 @@ function injectTelemetry(html: string): string {
   };
   var maxSeenDocHeight = 0;
   var maxSeenScrollY = 0;
+  var timeline = [];
+  window.__eyeProxyTimeline = timeline;
+
+  function pushTimeline(entry) {
+    try {
+      var prev = timeline.length > 0 ? timeline[timeline.length - 1] : null;
+      var changed =
+        !prev ||
+        Math.abs(prev.scrollY - entry.scrollY) >= 1 ||
+        Math.abs(prev.docHeight - entry.docHeight) >= 1 ||
+        Math.abs(prev.viewportHeight - entry.viewportHeight) >= 1 ||
+        entry.ts - prev.ts >= 700;
+      if (!changed) return;
+      timeline.push(entry);
+      if (timeline.length > 22000) {
+        timeline.splice(0, timeline.length - 22000);
+      }
+      window.__eyeProxyTimeline = timeline;
+    } catch (e) {
+      // ignore
+    }
+  }
 
   function readWindowMetrics() {
     var de = document.documentElement || document.body;
@@ -101,6 +123,13 @@ function injectTelemetry(html: string): string {
         scrollMode: effective.mode,
         maxScrollY: maxSeenScrollY
       };
+      pushTimeline({
+        ts: now,
+        scrollY: effective.scrollY,
+        docHeight: stableDocHeight,
+        viewportHeight: effective.viewportHeight,
+        scrollMode: effective.mode
+      });
       parent.postMessage({
         type: "proxy_metrics",
         ts: now,

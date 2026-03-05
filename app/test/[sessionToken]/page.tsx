@@ -554,7 +554,7 @@ export default function TestRunnerPage({ params }: PageProps) {
       topScreens,
       trackedDocHeight: Math.round(maxProtoDocHeightRef.current),
       maxScrollY: Math.round(maxProtoScrollYRef.current),
-      telemetryMode
+      telemetryMode: getEffectiveTelemetryMode()
     };
   };
 
@@ -590,12 +590,150 @@ export default function TestRunnerPage({ params }: PageProps) {
   const recordTelemetry = (entry: ScrollTelemetry) => {
     latestTelemetryRef.current = entry;
     telemetryHistoryRef.current.push(entry);
-    if (telemetryHistoryRef.current.length > 3000) {
-      telemetryHistoryRef.current = telemetryHistoryRef.current.slice(-3000);
+    if (telemetryHistoryRef.current.length > 20000) {
+      telemetryHistoryRef.current = telemetryHistoryRef.current.slice(-20000);
     }
     currentProtoScrollYRef.current = Math.max(0, entry.scrollY);
     maxProtoScrollYRef.current = Math.max(maxProtoScrollYRef.current, currentProtoScrollYRef.current);
     maxProtoDocHeightRef.current = Math.max(maxProtoDocHeightRef.current, entry.docHeight);
+  };
+
+  const getEffectiveTelemetryMode = (): "precise" | "estimated" | "none" => {
+    if (telemetryHistoryRef.current.length === 0) return "none";
+    if (proxyMetricsSeenRef.current) return "precise";
+    if (usingDirectFallback) return "estimated";
+    return telemetryMode === "none" ? "estimated" : telemetryMode;
+  };
+
+  const mergeTelemetryTimeline = (entries: ScrollTelemetry[]) => {
+    if (!entries.length) return;
+
+    const combined = [...telemetryHistoryRef.current, ...entries]
+      .filter((entry) =>
+        Number.isFinite(entry.ts) &&
+        Number.isFinite(entry.scrollY) &&
+        Number.isFinite(entry.docHeight) &&
+        Number.isFinite(entry.viewportHeight)
+      )
+      .map((entry) => ({
+        ts: Math.max(0, Math.round(entry.ts)),
+        scrollY: Math.max(0, entry.scrollY),
+        docHeight: Math.max(1, entry.docHeight),
+        viewportHeight: Math.max(1, entry.viewportHeight)
+      }))
+      .sort((a, b) => a.ts - b.ts);
+
+    const deduped: ScrollTelemetry[] = [];
+    for (const item of combined) {
+      const prev = deduped[deduped.length - 1];
+      if (
+        prev &&
+        prev.ts === item.ts &&
+        Math.abs(prev.scrollY - item.scrollY) < 0.5 &&
+        Math.abs(prev.docHeight - item.docHeight) < 0.5 &&
+        Math.abs(prev.viewportHeight - item.viewportHeight) < 0.5
+      ) {
+        continue;
+      }
+      deduped.push(item);
+    }
+
+    telemetryHistoryRef.current = deduped.slice(-20000);
+    const latest = telemetryHistoryRef.current[telemetryHistoryRef.current.length - 1] ?? null;
+    latestTelemetryRef.current = latest;
+
+    currentProtoScrollYRef.current = latest?.scrollY ?? 0;
+    maxProtoScrollYRef.current = 0;
+    maxProtoDocHeightRef.current = 0;
+    for (const item of telemetryHistoryRef.current) {
+      maxProtoScrollYRef.current = Math.max(maxProtoScrollYRef.current, item.scrollY);
+      maxProtoDocHeightRef.current = Math.max(maxProtoDocHeightRef.current, item.docHeight);
+    }
+  };
+
+  const pullProxyTelemetryTimeline = (): ScrollTelemetry[] => {
+    const frame = iframeRef.current;
+    if (!frame) return [];
+
+    try {
+      const win = frame.contentWindow as
+        | (Window & {
+            __eyeProxyTimeline?: unknown;
+            __eyeProxyMetrics?: ProxyMetricsSnapshot;
+          })
+        | null;
+      if (!win) return [];
+
+      const timelineRaw = Array.isArray(win.__eyeProxyTimeline) ? win.__eyeProxyTimeline : [];
+      const timeline: ScrollTelemetry[] = [];
+      for (const item of timelineRaw) {
+        if (typeof item !== "object" || !item) continue;
+        const ts = toFiniteNumber((item as { ts?: unknown }).ts);
+        const scrollY = toFiniteNumber((item as { scrollY?: unknown }).scrollY);
+        const docHeight = toFiniteNumber((item as { docHeight?: unknown }).docHeight);
+        const viewportHeight = toFiniteNumber((item as { viewportHeight?: unknown }).viewportHeight);
+        if (ts === null || scrollY === null) continue;
+        timeline.push({
+          ts,
+          scrollY: Math.max(0, scrollY),
+          docHeight: docHeight !== null ? Math.max(docHeight, scrollY + 1) : Math.max(1, scrollY + 1),
+          viewportHeight: viewportHeight !== null && viewportHeight > 0 ? viewportHeight : Math.max(1, window.innerHeight)
+        });
+      }
+
+      const latestMetrics = win.__eyeProxyMetrics;
+      const latestTs = toFiniteNumber(latestMetrics?.ts);
+      const latestScrollY = toFiniteNumber(latestMetrics?.scrollY);
+      const latestDocHeight = toFiniteNumber(latestMetrics?.docHeight);
+      const latestViewportHeight = toFiniteNumber(latestMetrics?.viewportHeight);
+      if (latestTs !== null && latestScrollY !== null) {
+        timeline.push({
+          ts: latestTs,
+          scrollY: Math.max(0, latestScrollY),
+          docHeight:
+            latestDocHeight !== null
+              ? Math.max(latestDocHeight, latestScrollY + 1)
+              : Math.max(maxProtoDocHeightRef.current, latestScrollY + 1),
+          viewportHeight:
+            latestViewportHeight !== null && latestViewportHeight > 0
+              ? latestViewportHeight
+              : Math.max(1, window.innerHeight)
+        });
+      }
+
+      return timeline;
+    } catch {
+      return [];
+    }
+  };
+
+  const remapSamplesWithTelemetry = (viewportWidth: number, viewportHeight: number) => {
+    const history = telemetryHistoryRef.current;
+    if (!history.length) return;
+
+    let cursor = 0;
+    for (const sample of reportSamplesRef.current) {
+      while (cursor + 1 < history.length && history[cursor + 1].ts <= sample.ts) {
+        cursor += 1;
+      }
+
+      const current = history[cursor];
+      const next = history[cursor + 1];
+      let scrollOffset = current.scrollY;
+      if (sample.ts < history[0].ts) {
+        scrollOffset = history[0].scrollY;
+      } else if (next && Math.abs(next.ts - sample.ts) < Math.abs(sample.ts - current.ts)) {
+        scrollOffset = next.scrollY;
+      }
+
+      if (sample.inFrame && sample.frameNX !== undefined && sample.frameNY !== undefined) {
+        sample.protoX = clamp(sample.frameNX * viewportWidth, 0, viewportWidth);
+        sample.protoY = Math.max(0, sample.frameNY * viewportHeight + scrollOffset);
+      } else {
+        sample.protoX = undefined;
+        sample.protoY = undefined;
+      }
+    }
   };
 
   const readIframeDocumentMetrics = (): { docHeight: number; viewportHeight: number } | null => {
@@ -897,7 +1035,19 @@ export default function TestRunnerPage({ params }: PageProps) {
     stopTracking();
     await flushEvents();
 
-    if (telemetryMode === "none") {
+    const frameRect = iframeRef.current?.getBoundingClientRect();
+    const viewportWidth = Math.max(320, Math.floor(frameRect?.width ?? window.innerWidth * 0.8));
+    const viewportHeight = Math.max(220, Math.floor(frameRect?.height ?? window.innerHeight * 0.65));
+    const proxyTimeline = pullProxyTelemetryTimeline();
+    if (proxyTimeline.length > 0) {
+      mergeTelemetryTimeline(proxyTimeline);
+      if (telemetryMode === "none") {
+        setTelemetryMode("precise");
+      }
+    }
+    remapSamplesWithTelemetry(viewportWidth, viewportHeight);
+
+    if (getEffectiveTelemetryMode() === "none") {
       setWarning(
         "No page scroll telemetry was captured during this run. Full-page heatmap coverage is limited for this session."
       );
