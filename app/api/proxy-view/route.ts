@@ -18,23 +18,63 @@ function injectTelemetry(html: string): string {
   const telemetryScript = `
 <script>
 (function () {
+  var activeScroll = {
+    top: 0,
+    height: 0,
+    client: 0,
+    updatedAt: 0
+  };
+
+  function readWindowMetrics() {
+    var de = document.documentElement || document.body;
+    var body = document.body;
+    var scrollY = window.scrollY || window.pageYOffset || 0;
+    var docHeight = Math.max(
+      de ? de.scrollHeight : 0,
+      body ? body.scrollHeight : 0,
+      de ? de.offsetHeight : 0,
+      body ? body.offsetHeight : 0,
+      de ? de.clientHeight : 0
+    );
+    return {
+      scrollY: scrollY,
+      docHeight: docHeight,
+      viewportHeight: window.innerHeight || 0
+    };
+  }
+
+  function readEffectiveMetrics() {
+    var win = readWindowMetrics();
+    var activeSpan = Math.max(0, activeScroll.height - activeScroll.client);
+    var winSpan = Math.max(0, win.docHeight - win.viewportHeight);
+    var activeIsFresh = Date.now() - activeScroll.updatedAt < 5000;
+
+    if (activeIsFresh && activeSpan > 40 && activeSpan >= winSpan) {
+      return {
+        scrollY: Math.max(0, activeScroll.top),
+        docHeight: Math.max(activeScroll.height, activeScroll.top + activeScroll.client),
+        viewportHeight: Math.max(1, activeScroll.client),
+        mode: "container"
+      };
+    }
+
+    return {
+      scrollY: Math.max(0, win.scrollY),
+      docHeight: Math.max(win.docHeight, win.scrollY + win.viewportHeight),
+      viewportHeight: Math.max(1, win.viewportHeight),
+      mode: "window"
+    };
+  }
+
   function postMetrics() {
     try {
-      var de = document.documentElement || document.body;
-      var body = document.body;
-      var scrollY = window.scrollY || window.pageYOffset || 0;
-      var docHeight = Math.max(
-        de ? de.scrollHeight : 0,
-        body ? body.scrollHeight : 0,
-        de ? de.offsetHeight : 0,
-        body ? body.offsetHeight : 0,
-        de ? de.clientHeight : 0
-      );
+      var effective = readEffectiveMetrics();
       parent.postMessage({
         type: "proxy_metrics",
-        scrollY: scrollY,
-        docHeight: docHeight,
-        viewportHeight: window.innerHeight || 0,
+        scrollY: effective.scrollY,
+        docHeight: effective.docHeight,
+        viewportHeight: effective.viewportHeight,
+        scrollMode: effective.mode,
         href: String(location.href || "")
       }, "*");
     } catch (err) {
@@ -43,6 +83,28 @@ function injectTelemetry(html: string): string {
   }
 
   window.addEventListener("scroll", postMetrics, { passive: true });
+  document.addEventListener("scroll", function (event) {
+    try {
+      var target = event.target;
+      if (!target || target === document || target === window || target === document.documentElement || target === document.body) {
+        postMetrics();
+        return;
+      }
+      var top = typeof target.scrollTop === "number" ? target.scrollTop : 0;
+      var height = typeof target.scrollHeight === "number" ? target.scrollHeight : 0;
+      var client = typeof target.clientHeight === "number" ? target.clientHeight : 0;
+      var span = height - client;
+      if (span > 40) {
+        activeScroll.top = Math.max(0, top);
+        activeScroll.height = Math.max(height, top + client);
+        activeScroll.client = Math.max(1, client);
+        activeScroll.updatedAt = Date.now();
+      }
+      postMetrics();
+    } catch (e) {
+      postMetrics();
+    }
+  }, { passive: true, capture: true });
   window.addEventListener("resize", postMetrics);
   window.addEventListener("load", postMetrics);
 

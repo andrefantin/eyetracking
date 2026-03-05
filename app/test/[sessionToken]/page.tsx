@@ -29,6 +29,9 @@ type SessionReport = {
   avgConfidence: number;
   durationSec: number;
   topScreens: Array<{ screenId: string; samples: number }>;
+  trackedDocHeight: number;
+  maxScrollY: number;
+  telemetryMode: "precise" | "estimated" | "none";
 };
 
 type ReportSample = {
@@ -243,7 +246,10 @@ async function buildPdfDataUrl(options: {
       `Target URL: ${options.targetUrl}`,
       `Total gaze samples: ${options.summary.totalSamples}`,
       `Average confidence: ${options.summary.avgConfidence}`,
-      `Duration: ${options.summary.durationSec}s`
+      `Duration: ${options.summary.durationSec}s`,
+      `Telemetry mode: ${options.summary.telemetryMode}`,
+      `Tracked document height: ${options.summary.trackedDocHeight}px`,
+      `Max tracked scroll: ${options.summary.maxScrollY}px`
     ];
     for (const line of lines) {
       const wrapped = doc.splitTextToSize(line, pageWidth - margin * 2);
@@ -337,6 +343,7 @@ export default function TestRunnerPage({ params }: PageProps) {
   const lastProxyTelemetryTsRef = useRef<number>(0);
   const telemetryHistoryRef = useRef<ScrollTelemetry[]>([]);
   const latestTelemetryRef = useRef<ScrollTelemetry | null>(null);
+  const telemetryPollIdRef = useRef<number | null>(null);
 
   const figmaSourceUrl = useMemo(() => {
     const targetUrlFromQuery = searchParams.get("targetUrl")?.trim();
@@ -363,6 +370,71 @@ export default function TestRunnerPage({ params }: PageProps) {
     setUsingDirectFallback(false);
     setTelemetryMode("none");
   }, [figmaEmbedUrl, figmaSourceUrl, isUsingPlaceholderFigma]);
+
+  useEffect(() => {
+    if (!activeIframeUrl.startsWith("/api/proxy-view")) {
+      if (telemetryPollIdRef.current !== null) {
+        window.clearInterval(telemetryPollIdRef.current);
+        telemetryPollIdRef.current = null;
+      }
+      return;
+    }
+
+    const readTelemetryFromIframe = () => {
+      if (stage !== "running" && stage !== "finished") return;
+      const frame = iframeRef.current;
+      if (!frame) return;
+
+      try {
+        const win = frame.contentWindow;
+        const doc = frame.contentDocument;
+        if (!win || !doc) return;
+        const de = doc.documentElement;
+        const body = doc.body;
+        if (!de && !body) return;
+
+        const scrollY = Math.max(
+          win.scrollY || 0,
+          win.pageYOffset || 0,
+          de?.scrollTop || 0,
+          body?.scrollTop || 0
+        );
+        const docHeight = Math.max(
+          de?.scrollHeight || 0,
+          body?.scrollHeight || 0,
+          de?.offsetHeight || 0,
+          body?.offsetHeight || 0,
+          de?.clientHeight || 0
+        );
+        const viewportHeight = Math.max(
+          win.innerHeight || 0,
+          de?.clientHeight || 0
+        );
+
+        proxyMetricsSeenRef.current = true;
+        lastProxyTelemetryTsRef.current = Date.now();
+        setTelemetryMode("precise");
+        recordTelemetry({
+          ts: Date.now(),
+          scrollY: Math.max(0, scrollY),
+          docHeight: Math.max(docHeight, scrollY + viewportHeight),
+          viewportHeight: Math.max(1, viewportHeight)
+        });
+      } catch {
+        // Cross-origin or transient iframe read errors in direct mode.
+      }
+    };
+
+    readTelemetryFromIframe();
+    telemetryPollIdRef.current = window.setInterval(readTelemetryFromIframe, 120);
+
+    return () => {
+      if (telemetryPollIdRef.current !== null) {
+        window.clearInterval(telemetryPollIdRef.current);
+        telemetryPollIdRef.current = null;
+      }
+    };
+  }, [activeIframeUrl, stage]);
 
   const averageCalibrationScore = useMemo(() => {
     if (!calibrationScores.length) return null;
@@ -436,7 +508,10 @@ export default function TestRunnerPage({ params }: PageProps) {
       totalSamples,
       avgConfidence,
       durationSec,
-      topScreens
+      topScreens,
+      trackedDocHeight: Math.round(maxProtoDocHeightRef.current),
+      maxScrollY: Math.round(maxProtoScrollYRef.current),
+      telemetryMode
     };
   };
 
@@ -957,9 +1032,6 @@ export default function TestRunnerPage({ params }: PageProps) {
                 allow="camera; microphone"
               />
               {stage === "running" && <GazeOverlay x={gazePoint?.x ?? 0} y={gazePoint?.y ?? 0} visible={!!gazePoint} />}
-              {stage === "finished" && heatmapOverlayPngDataUrl && (
-                <img src={heatmapOverlayPngDataUrl} alt="Heatmap overlay" className="heatmap-overlay" />
-              )}
             </>
           )}
           {stage === "calibration" && (
@@ -988,6 +1060,15 @@ export default function TestRunnerPage({ params }: PageProps) {
           </p>
           <p>
             <strong>Duration:</strong> {sessionReport.durationSec}s
+          </p>
+          <p>
+            <strong>Telemetry mode:</strong> {sessionReport.telemetryMode}
+          </p>
+          <p>
+            <strong>Tracked document height:</strong> {sessionReport.trackedDocHeight}px
+          </p>
+          <p>
+            <strong>Max tracked scroll:</strong> {sessionReport.maxScrollY}px
           </p>
           <p>
             <strong>Top viewed screens:</strong>
@@ -1027,6 +1108,12 @@ export default function TestRunnerPage({ params }: PageProps) {
               <span>JPG not ready</span>
             )}
           </div>
+          {heatmapOverlayPngDataUrl && (
+            <div className="report-preview-block">
+              <p><strong>Viewport Heatmap Preview</strong></p>
+              <img src={heatmapOverlayPngDataUrl} alt="Viewport heatmap preview" className="report-preview-image" />
+            </div>
+          )}
         </section>
       )}
 

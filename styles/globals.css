@@ -67,6 +67,20 @@ body {
   opacity: 0.72;
 }
 
+.report-preview-block {
+  margin-top: 14px;
+}
+
+.report-preview-image {
+  display: block;
+  margin-top: 6px;
+  width: 100%;
+  max-width: 720px;
+  border-radius: 10px;
+  border: 1px solid #dbe4ff;
+  background: #0b1020;
+}
+
 .calibration-shell {
   position: absolute;
   inset: 0;
@@ -135,12 +149,15 @@ body {
 .calibration-help {
   position: absolute;
   left: 50%;
-  bottom: 22px;
+  top: 16px;
+  bottom: auto;
   transform: translateX(-50%);
   color: #ffffff;
   background: rgba(0, 0, 0, 0.45);
   padding: 8px 12px;
   border-radius: 8px;
+  pointer-events: none;
+  z-index: 16;
 }
 
 .runner-footer {
