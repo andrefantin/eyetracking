@@ -24,6 +24,12 @@ function injectTelemetry(html: string): string {
     client: 0,
     updatedAt: 0
   };
+  var virtualScroll = {
+    offset: 0,
+    updatedAt: 0
+  };
+  var maxSeenDocHeight = 0;
+  var maxSeenScrollY = 0;
 
   function readWindowMetrics() {
     var de = document.documentElement || document.body;
@@ -48,6 +54,7 @@ function injectTelemetry(html: string): string {
     var activeSpan = Math.max(0, activeScroll.height - activeScroll.client);
     var winSpan = Math.max(0, win.docHeight - win.viewportHeight);
     var activeIsFresh = Date.now() - activeScroll.updatedAt < 5000;
+    var virtualIsFresh = Date.now() - virtualScroll.updatedAt < 5000;
 
     if (activeIsFresh && activeSpan > 40 && activeSpan >= winSpan) {
       return {
@@ -55,6 +62,15 @@ function injectTelemetry(html: string): string {
         docHeight: Math.max(activeScroll.height, activeScroll.top + activeScroll.client),
         viewportHeight: Math.max(1, activeScroll.client),
         mode: "container"
+      };
+    }
+
+    if (virtualIsFresh && Math.abs(virtualScroll.offset - win.scrollY) > 8) {
+      return {
+        scrollY: Math.max(0, virtualScroll.offset),
+        docHeight: Math.max(win.docHeight, virtualScroll.offset + win.viewportHeight),
+        viewportHeight: Math.max(1, win.viewportHeight),
+        mode: "virtual-wheel"
       };
     }
 
@@ -69,10 +85,27 @@ function injectTelemetry(html: string): string {
   function postMetrics() {
     try {
       var effective = readEffectiveMetrics();
+      var now = Date.now();
+      var stableDocHeight = Math.max(
+        maxSeenDocHeight,
+        effective.docHeight,
+        effective.scrollY + effective.viewportHeight
+      );
+      maxSeenDocHeight = stableDocHeight;
+      maxSeenScrollY = Math.max(maxSeenScrollY, effective.scrollY);
+      window.__eyeProxyMetrics = {
+        ts: now,
+        scrollY: effective.scrollY,
+        docHeight: stableDocHeight,
+        viewportHeight: effective.viewportHeight,
+        scrollMode: effective.mode,
+        maxScrollY: maxSeenScrollY
+      };
       parent.postMessage({
         type: "proxy_metrics",
+        ts: now,
         scrollY: effective.scrollY,
-        docHeight: effective.docHeight,
+        docHeight: stableDocHeight,
         viewportHeight: effective.viewportHeight,
         scrollMode: effective.mode,
         href: String(location.href || "")
@@ -82,7 +115,16 @@ function injectTelemetry(html: string): string {
     }
   }
 
-  window.addEventListener("scroll", postMetrics, { passive: true });
+  window.addEventListener("scroll", function () {
+    try {
+      var y = window.scrollY || window.pageYOffset || 0;
+      virtualScroll.offset = Math.max(0, y);
+      virtualScroll.updatedAt = Date.now();
+    } catch (e) {
+      // ignore
+    }
+    postMetrics();
+  }, { passive: true });
   document.addEventListener("scroll", function (event) {
     try {
       var target = event.target;
@@ -99,10 +141,24 @@ function injectTelemetry(html: string): string {
         activeScroll.height = Math.max(height, top + client);
         activeScroll.client = Math.max(1, client);
         activeScroll.updatedAt = Date.now();
+        virtualScroll.offset = Math.max(0, top);
+        virtualScroll.updatedAt = Date.now();
       }
       postMetrics();
     } catch (e) {
       postMetrics();
+    }
+  }, { passive: true, capture: true });
+  document.addEventListener("wheel", function (event) {
+    try {
+      var deltaY = typeof event.deltaY === "number" ? event.deltaY : 0;
+      if (!isFinite(deltaY) || deltaY === 0) return;
+      var capped = Math.max(-900, Math.min(900, deltaY));
+      virtualScroll.offset = Math.max(0, virtualScroll.offset + capped);
+      virtualScroll.updatedAt = Date.now();
+      postMetrics();
+    } catch (e) {
+      // ignore
     }
   }, { passive: true, capture: true });
   window.addEventListener("resize", postMetrics);
@@ -122,7 +178,7 @@ function injectTelemetry(html: string): string {
     return result;
   };
 
-  setInterval(postMetrics, 700);
+  setInterval(postMetrics, 180);
   postMetrics();
 })();
 </script>`;

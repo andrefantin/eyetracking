@@ -56,6 +56,14 @@ type ScrollTelemetry = {
 
 type EmailStatus = "idle" | "sending" | "sent" | "skipped" | "error";
 
+type ProxyMetricsSnapshot = {
+  ts?: number;
+  scrollY?: number;
+  docHeight?: number;
+  viewportHeight?: number;
+  scrollMode?: string;
+};
+
 const BATCH_INTERVAL_MS = 750;
 const BATCH_MAX_EVENTS = 50;
 const FIGMA_URL_PLACEHOLDER = "https://www.figma.com/proto/your-file-id/your-prototype";
@@ -69,6 +77,11 @@ function pointDistance(aX: number, aY: number, bX: number, bY: number): number {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function heatColor(t: number): [number, number, number, number] {
@@ -148,10 +161,13 @@ function buildScrollableHeatmapCanvas(
   );
   const width = Math.max(1, Math.floor(viewportWidth));
   const maxY = frameSamples.reduce((acc, sample) => Math.max(acc, sample.protoY as number), viewportHeight);
-  const desiredHeight = Math.max(maxY + 120, fullDocHeight ?? 0);
-  const maxCanvasHeight = 16000;
-  const scaleY = desiredHeight > maxCanvasHeight ? desiredHeight / maxCanvasHeight : 1;
-  const height = Math.max(1, Math.floor(desiredHeight / scaleY));
+  const desiredHeight = Math.max(
+    fullDocHeight && fullDocHeight > 0 ? fullDocHeight : 0,
+    maxY + 120,
+    viewportHeight
+  );
+  const maxCanvasHeight = 30000;
+  const height = Math.max(1, Math.floor(Math.min(desiredHeight, maxCanvasHeight)));
 
   const canvas = document.createElement("canvas");
   canvas.width = width;
@@ -165,10 +181,10 @@ function buildScrollableHeatmapCanvas(
   const actx = accumulation.getContext("2d");
   if (!actx) return canvas;
 
-  const radius = Math.max(20, Math.round(Math.min(width, viewportHeight / scaleY) * 0.05));
+  const radius = Math.max(20, Math.round(Math.min(width, viewportHeight) * 0.05));
   for (const sample of frameSamples) {
     const x = clamp(sample.protoX as number, 0, width);
-    const y = clamp((sample.protoY as number) / scaleY, 0, height);
+    const y = clamp(sample.protoY as number, 0, height);
     const gradient = actx.createRadialGradient(x, y, 0, x, y, radius);
     const strength = clamp(0.05 + sample.confidence * 0.12, 0.04, 0.18);
     gradient.addColorStop(0, `rgba(255,255,255,${strength})`);
@@ -314,7 +330,6 @@ export default function TestRunnerPage({ params }: PageProps) {
   const [engineName, setEngineName] = useState<"mediapipe" | "pointer-fallback" | null>(null);
   const [calibrationScores, setCalibrationScores] = useState<number[]>([]);
   const [sessionReport, setSessionReport] = useState<SessionReport | null>(null);
-  const [heatmapOverlayPngDataUrl, setHeatmapOverlayPngDataUrl] = useState<string | null>(null);
   const [heatmapPngDataUrl, setHeatmapPngDataUrl] = useState<string | null>(null);
   const [heatmapJpgDataUrl, setHeatmapJpgDataUrl] = useState<string | null>(null);
   const [reportPdfDataUrl, setReportPdfDataUrl] = useState<string | null>(null);
@@ -386,9 +401,39 @@ export default function TestRunnerPage({ params }: PageProps) {
       if (!frame) return;
 
       try {
-        const win = frame.contentWindow;
+        const win = frame.contentWindow as (Window & { __eyeProxyMetrics?: ProxyMetricsSnapshot }) | null;
+        if (!win) return;
+
+        // Primary source: telemetry injected in proxy page. This includes scroll-container metrics.
+        const proxyMetrics = win.__eyeProxyMetrics;
+        const proxyScrollY = toFiniteNumber(proxyMetrics?.scrollY);
+        if (proxyMetrics && proxyScrollY !== null) {
+          const proxyDocHeight = toFiniteNumber(proxyMetrics.docHeight);
+          const proxyViewportHeight = toFiniteNumber(proxyMetrics.viewportHeight);
+          const proxyTs = toFiniteNumber(proxyMetrics.ts) ?? Date.now();
+          proxyMetricsSeenRef.current = true;
+          lastProxyTelemetryTsRef.current = Date.now();
+          setTelemetryMode("precise");
+          recordTelemetry({
+            ts: proxyTs,
+            scrollY: Math.max(0, proxyScrollY),
+            docHeight:
+              proxyDocHeight !== null
+                ? Math.max(proxyDocHeight, proxyScrollY + 1)
+                : Math.max(maxProtoDocHeightRef.current, proxyScrollY + 1),
+            viewportHeight:
+              proxyViewportHeight !== null && proxyViewportHeight > 0
+                ? proxyViewportHeight
+                : Math.max(1, win.innerHeight || window.innerHeight)
+          });
+          return;
+        }
+
+        // If proxy metrics were already seen, never overwrite with window-level fallback values.
+        if (proxyMetricsSeenRef.current) return;
+
         const doc = frame.contentDocument;
-        if (!win || !doc) return;
+        if (!doc) return;
         const de = doc.documentElement;
         const body = doc.body;
         if (!de && !body) return;
@@ -411,9 +456,7 @@ export default function TestRunnerPage({ params }: PageProps) {
           de?.clientHeight || 0
         );
 
-        proxyMetricsSeenRef.current = true;
-        lastProxyTelemetryTsRef.current = Date.now();
-        setTelemetryMode("precise");
+        setTelemetryMode("estimated");
         recordTelemetry({
           ts: Date.now(),
           scrollY: Math.max(0, scrollY),
@@ -520,17 +563,25 @@ export default function TestRunnerPage({ params }: PageProps) {
     const rect = frameElement?.getBoundingClientRect();
     const width = Math.max(320, Math.floor(rect?.width ?? window.innerWidth * 0.8));
     const height = Math.max(220, Math.floor(rect?.height ?? window.innerHeight * 0.65));
-    const telemetryViewportHeight = latestTelemetryRef.current?.viewportHeight ?? height;
+    const iframeDocumentMetrics = readIframeDocumentMetrics();
+    const telemetryViewportHeight =
+      iframeDocumentMetrics?.viewportHeight ??
+      latestTelemetryRef.current?.viewportHeight ??
+      height;
+    const maxSampleProtoY = reportSamplesRef.current.reduce((acc, sample) => {
+      if (!sample.inFrame || sample.protoY === undefined) return acc;
+      return Math.max(acc, sample.protoY);
+    }, 0);
     const derivedDocHeight = Math.max(
       maxProtoDocHeightRef.current,
+      iframeDocumentMetrics?.docHeight ?? 0,
       maxProtoScrollYRef.current + telemetryViewportHeight,
+      maxSampleProtoY + 120,
       height
     );
-    const viewportCanvas = buildHeatmapCanvas(width, height, reportSamplesRef.current);
     const fullCanvas = buildScrollableHeatmapCanvas(width, height, reportSamplesRef.current, derivedDocHeight);
 
     return {
-      overlayPngDataUrl: viewportCanvas.toDataURL("image/png"),
       pngDataUrl: fullCanvas.toDataURL("image/png"),
       jpgDataUrl: fullCanvas.toDataURL("image/jpeg", 0.9)
     };
@@ -545,6 +596,64 @@ export default function TestRunnerPage({ params }: PageProps) {
     currentProtoScrollYRef.current = Math.max(0, entry.scrollY);
     maxProtoScrollYRef.current = Math.max(maxProtoScrollYRef.current, currentProtoScrollYRef.current);
     maxProtoDocHeightRef.current = Math.max(maxProtoDocHeightRef.current, entry.docHeight);
+  };
+
+  const readIframeDocumentMetrics = (): { docHeight: number; viewportHeight: number } | null => {
+    const frame = iframeRef.current;
+    if (!frame) return null;
+
+    try {
+      const win = frame.contentWindow as (Window & { __eyeProxyMetrics?: ProxyMetricsSnapshot }) | null;
+      const doc = frame.contentDocument;
+      if (!win || !doc) return null;
+
+      const de = doc.documentElement;
+      const body = doc.body;
+      const proxyDocHeight = toFiniteNumber(win.__eyeProxyMetrics?.docHeight) ?? 0;
+      const proxyViewportHeight = toFiniteNumber(win.__eyeProxyMetrics?.viewportHeight) ?? 0;
+      const windowDocHeight = Math.max(
+        de?.scrollHeight || 0,
+        body?.scrollHeight || 0,
+        de?.offsetHeight || 0,
+        body?.offsetHeight || 0,
+        de?.clientHeight || 0
+      );
+      const windowViewportHeight = Math.max(
+        win.innerHeight || 0,
+        de?.clientHeight || 0
+      );
+
+      // Fallback for apps that scroll inside custom containers.
+      let largestScrollableHeight = 0;
+      const elements = doc.querySelectorAll<HTMLElement>("*");
+      const maxElementsToScan = 2500;
+      for (let i = 0; i < elements.length && i < maxElementsToScan; i += 1) {
+        const node = elements[i];
+        if (node.scrollHeight - node.clientHeight > 40) {
+          largestScrollableHeight = Math.max(largestScrollableHeight, node.scrollHeight);
+        }
+      }
+
+      const docHeight = Math.max(
+        proxyDocHeight,
+        windowDocHeight,
+        largestScrollableHeight,
+        maxProtoDocHeightRef.current
+      );
+      const viewportHeight = Math.max(
+        proxyViewportHeight,
+        windowViewportHeight,
+        latestTelemetryRef.current?.viewportHeight ?? 0,
+        1
+      );
+
+      return {
+        docHeight: Math.max(1, Math.floor(docHeight)),
+        viewportHeight: Math.max(1, Math.floor(viewportHeight))
+      };
+    } catch {
+      return null;
+    }
   };
 
   const getScrollOffsetForTimestamp = (ts: number): number => {
@@ -686,6 +795,7 @@ export default function TestRunnerPage({ params }: PageProps) {
     telemetryHistoryRef.current = [];
     latestTelemetryRef.current = null;
     lastProxyTelemetryTsRef.current = 0;
+    proxyMetricsSeenRef.current = false;
     currentProtoScrollYRef.current = 0;
     maxProtoScrollYRef.current = 0;
     maxProtoDocHeightRef.current = 0;
@@ -796,7 +906,6 @@ export default function TestRunnerPage({ params }: PageProps) {
     const report = buildSessionReport();
     setSessionReport(report);
     const artifacts = generateHeatmapArtifacts();
-    setHeatmapOverlayPngDataUrl(artifacts.overlayPngDataUrl);
     setHeatmapPngDataUrl(artifacts.pngDataUrl);
     setHeatmapJpgDataUrl(artifacts.jpgDataUrl);
     const pdfDataUrl = await buildPdfDataUrl({
@@ -928,16 +1037,17 @@ export default function TestRunnerPage({ params }: PageProps) {
       if (event.data.type !== "proxy_metrics") return;
       proxyMetricsSeenRef.current = true;
       lastProxyTelemetryTsRef.current = Date.now();
-      const scrollY = Number(event.data.scrollY);
-      const docHeight = Number(event.data.docHeight);
-      const viewportHeight = Number(event.data.viewportHeight);
-      if (Number.isFinite(scrollY)) {
+      const scrollY = toFiniteNumber(event.data.scrollY);
+      const docHeight = toFiniteNumber(event.data.docHeight);
+      const viewportHeight = toFiniteNumber(event.data.viewportHeight);
+      const ts = toFiniteNumber(event.data.ts) ?? Date.now();
+      if (scrollY !== null) {
         setTelemetryMode("precise");
         recordTelemetry({
-          ts: Date.now(),
+          ts,
           scrollY: Math.max(0, scrollY),
-          docHeight: Number.isFinite(docHeight) ? Math.max(docHeight, scrollY + 1) : Math.max(maxProtoDocHeightRef.current, scrollY + 1),
-          viewportHeight: Number.isFinite(viewportHeight) && viewportHeight > 0 ? viewportHeight : window.innerHeight
+          docHeight: docHeight !== null ? Math.max(docHeight, scrollY + 1) : Math.max(maxProtoDocHeightRef.current, scrollY + 1),
+          viewportHeight: viewportHeight !== null && viewportHeight > 0 ? viewportHeight : window.innerHeight
         });
       }
     };
@@ -1108,12 +1218,6 @@ export default function TestRunnerPage({ params }: PageProps) {
               <span>JPG not ready</span>
             )}
           </div>
-          {heatmapOverlayPngDataUrl && (
-            <div className="report-preview-block">
-              <p><strong>Viewport Heatmap Preview</strong></p>
-              <img src={heatmapOverlayPngDataUrl} alt="Viewport heatmap preview" className="report-preview-image" />
-            </div>
-          )}
         </section>
       )}
 
