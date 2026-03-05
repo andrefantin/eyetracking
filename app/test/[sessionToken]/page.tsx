@@ -313,7 +313,8 @@ export default function TestRunnerPage({ params }: PageProps) {
   const [heatmapJpgDataUrl, setHeatmapJpgDataUrl] = useState<string | null>(null);
   const [reportPdfDataUrl, setReportPdfDataUrl] = useState<string | null>(null);
   const [emailStatus, setEmailStatus] = useState<EmailStatus>("idle");
-  const [usingDirectWebsiteFallback, setUsingDirectWebsiteFallback] = useState(false);
+  const [usingDirectFallback, setUsingDirectFallback] = useState(false);
+  const [telemetryMode, setTelemetryMode] = useState<"precise" | "estimated" | "none">("none");
 
   const participantName = searchParams.get("participant")?.trim() ?? "";
 
@@ -333,6 +334,7 @@ export default function TestRunnerPage({ params }: PageProps) {
   const maxProtoScrollYRef = useRef(0);
   const maxProtoDocHeightRef = useRef(0);
   const proxyMetricsSeenRef = useRef(false);
+  const lastProxyTelemetryTsRef = useRef<number>(0);
   const telemetryHistoryRef = useRef<ScrollTelemetry[]>([]);
   const latestTelemetryRef = useRef<ScrollTelemetry | null>(null);
 
@@ -347,19 +349,20 @@ export default function TestRunnerPage({ params }: PageProps) {
     return candidate.includes("embed_host") ? candidate : `${candidate}${candidate.includes("?") ? "&" : "?"}embed_host=eye-tracker`;
   }, [figmaSourceUrl]);
   const isFigmaTarget = useMemo(() => /https?:\/\/(www\.)?figma\.com\/proto\//i.test(figmaSourceUrl), [figmaSourceUrl]);
+  const isUsingPlaceholderFigma = figmaEmbedUrl.includes("your-file-id");
   const [activeIframeUrl, setActiveIframeUrl] = useState<string>("");
 
   useEffect(() => {
-    if (isFigmaTarget) {
+    if (isUsingPlaceholderFigma) {
       setActiveIframeUrl(figmaEmbedUrl);
-      setUsingDirectWebsiteFallback(false);
+      setUsingDirectFallback(false);
+      setTelemetryMode("none");
       return;
     }
     setActiveIframeUrl(`/api/proxy-view?target=${encodeURIComponent(figmaSourceUrl)}`);
-    setUsingDirectWebsiteFallback(false);
-  }, [figmaEmbedUrl, figmaSourceUrl, isFigmaTarget]);
-
-  const isUsingPlaceholderFigma = figmaEmbedUrl.includes("your-file-id");
+    setUsingDirectFallback(false);
+    setTelemetryMode("none");
+  }, [figmaEmbedUrl, figmaSourceUrl, isUsingPlaceholderFigma]);
 
   const averageCalibrationScore = useMemo(() => {
     if (!calibrationScores.length) return null;
@@ -607,6 +610,7 @@ export default function TestRunnerPage({ params }: PageProps) {
     reportSamplesRef.current = [];
     telemetryHistoryRef.current = [];
     latestTelemetryRef.current = null;
+    lastProxyTelemetryTsRef.current = 0;
     currentProtoScrollYRef.current = 0;
     maxProtoScrollYRef.current = 0;
     maxProtoDocHeightRef.current = 0;
@@ -708,6 +712,12 @@ export default function TestRunnerPage({ params }: PageProps) {
     stopTracking();
     await flushEvents();
 
+    if (telemetryMode === "none") {
+      setWarning(
+        "No page scroll telemetry was captured during this run. Full-page heatmap coverage is limited for this session."
+      );
+    }
+
     const report = buildSessionReport();
     setSessionReport(report);
     const artifacts = generateHeatmapArtifacts();
@@ -748,10 +758,17 @@ export default function TestRunnerPage({ params }: PageProps) {
       pointerPosRef.current = { x: event.clientX, y: event.clientY };
     };
 
+    const shouldUseHeuristicScroll = () => {
+      if (usingDirectFallback) return true;
+      if (lastProxyTelemetryTsRef.current === 0) return true;
+      return Date.now() - lastProxyTelemetryTsRef.current > 1200;
+    };
+
     const addScrollDelta = (deltaY: number) => {
       const capped = clamp(deltaY, -900, 900);
-      if (isFigmaTarget) {
+      if (shouldUseHeuristicScroll()) {
         const next = Math.max(0, currentProtoScrollYRef.current + capped);
+        setTelemetryMode("estimated");
         recordTelemetry({
           ts: Date.now(),
           scrollY: next,
@@ -765,12 +782,14 @@ export default function TestRunnerPage({ params }: PageProps) {
       if (stage !== "running") return;
       const pointer = pointerPosRef.current;
       const rect = prototypeShellRef.current?.getBoundingClientRect() ?? iframeRef.current?.getBoundingClientRect();
-      if (!pointer || !rect) return;
+      if (!rect) return;
+      const px = pointer?.x ?? event.clientX;
+      const py = pointer?.y ?? event.clientY;
       const inside =
-        pointer.x >= rect.left &&
-        pointer.x <= rect.right &&
-        pointer.y >= rect.top &&
-        pointer.y <= rect.bottom;
+        px >= rect.left &&
+        px <= rect.right &&
+        py >= rect.top &&
+        py <= rect.bottom;
       if (!inside) return;
       addScrollDelta(event.deltaY);
     };
@@ -805,7 +824,7 @@ export default function TestRunnerPage({ params }: PageProps) {
       iframeElement?.removeEventListener("wheel", onWheel, true);
       shellElement?.removeEventListener("wheel", onWheel, true);
     };
-  }, [isFigmaTarget, stage]);
+  }, [stage, usingDirectFallback]);
 
   useEffect(() => {
     const onVisibilityChange = () => {
@@ -833,10 +852,12 @@ export default function TestRunnerPage({ params }: PageProps) {
       if (typeof event.data !== "object" || !event.data) return;
       if (event.data.type !== "proxy_metrics") return;
       proxyMetricsSeenRef.current = true;
+      lastProxyTelemetryTsRef.current = Date.now();
       const scrollY = Number(event.data.scrollY);
       const docHeight = Number(event.data.docHeight);
       const viewportHeight = Number(event.data.viewportHeight);
       if (Number.isFinite(scrollY)) {
+        setTelemetryMode("precise");
         recordTelemetry({
           ts: Date.now(),
           scrollY: Math.max(0, scrollY),
@@ -849,11 +870,11 @@ export default function TestRunnerPage({ params }: PageProps) {
     const onProxyError = (event: MessageEvent) => {
       if (typeof event.data !== "object" || !event.data) return;
       if (event.data.type !== "proxy_error") return;
-      if (isFigmaTarget) return;
-      setUsingDirectWebsiteFallback(true);
-      setActiveIframeUrl(figmaSourceUrl);
+      setUsingDirectFallback(true);
+      setTelemetryMode("estimated");
+      setActiveIframeUrl(isFigmaTarget ? figmaEmbedUrl : figmaSourceUrl);
       setWarning(
-        "Proxy mode failed for this website. Switched to direct website loading. Heatmap scroll coverage may be approximate."
+        "Proxy mode failed for this target. Switched to direct loading. Full-page heatmap may be approximate."
       );
     };
 
@@ -868,22 +889,7 @@ export default function TestRunnerPage({ params }: PageProps) {
       window.removeEventListener("message", onProxyMetrics);
       window.removeEventListener("message", onProxyError);
     };
-  }, [currentScreenId, figmaSourceUrl, isFigmaTarget, stage]);
-
-  useEffect(() => {
-    if (isFigmaTarget || usingDirectWebsiteFallback) return;
-    proxyMetricsSeenRef.current = false;
-    const timeout = window.setTimeout(() => {
-      if (!proxyMetricsSeenRef.current) {
-        setUsingDirectWebsiteFallback(true);
-        setActiveIframeUrl(figmaSourceUrl);
-        setWarning(
-          "Could not read website scroll telemetry in proxy mode. Switched to direct loading; full-page heatmap may be limited."
-        );
-      }
-    }, 4500);
-    return () => window.clearTimeout(timeout);
-  }, [figmaSourceUrl, isFigmaTarget, usingDirectWebsiteFallback]);
+  }, [currentScreenId, figmaEmbedUrl, figmaSourceUrl, isFigmaTarget, stage]);
 
   useEffect(() => {
     return () => {
@@ -917,11 +923,12 @@ export default function TestRunnerPage({ params }: PageProps) {
         <span>Engine: {engineName ?? "not initialized"}</span>
         <span>Calibration score: {averageCalibrationScore !== null ? `${averageCalibrationScore}/100` : "pending"}</span>
         <span>Email report: {emailStatus}</span>
-        <span>Source mode: {isFigmaTarget ? "figma-embed" : usingDirectWebsiteFallback ? "website-direct" : "website-proxy"}</span>
+        <span>Source mode: {usingDirectFallback ? "direct" : "proxy"}</span>
+        <span>Telemetry: {telemetryMode}</span>
       </section>
-      {isFigmaTarget && (
+      {isFigmaTarget && usingDirectFallback && (
         <p className="warning-banner">
-          Figma embeds are cross-origin, so full internal scroll telemetry is limited. Exported scroll heatmap for Figma is best-effort.
+          Figma is running in direct mode (proxy failed), so full internal scroll telemetry is limited. Exported scroll heatmap is best-effort.
         </p>
       )}
 

@@ -66,8 +66,8 @@ You can pass setup values directly in the URL:
 - `/test/<sessionToken>?targetUrl=https%3A%2F%2Fwww.figma.com%2Fproto%2F...`
 - both can be combined.
 
-For non-Figma websites, the app uses a same-origin proxy route (`/api/proxy-view`) so scroll telemetry can be captured for full-page heatmaps.
-If proxy telemetry fails, the UI falls back to direct website mode; in that fallback, full-page scroll heatmaps may be limited.
+The app uses a same-origin proxy route (`/api/proxy-view`) for target URLs so scroll telemetry can be captured for full-page heatmaps.
+If proxy reports an explicit error, the UI falls back to direct mode; in direct mode, full-page scroll heatmaps are estimated from user input events.
 
 ## Notes
 
