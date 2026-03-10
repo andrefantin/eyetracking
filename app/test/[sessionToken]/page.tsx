@@ -69,6 +69,13 @@ const BATCH_MAX_EVENTS = 50;
 const FIGMA_URL_PLACEHOLDER = "https://www.figma.com/proto/your-file-id/your-prototype";
 const CALIBRATION_MAX_RETRIES_PER_POINT = 2;
 
+function makeProxyUrl(target: string, retryKey?: string): string {
+  const params = new URLSearchParams();
+  params.set("target", target);
+  if (retryKey) params.set("r", retryKey);
+  return `/api/proxy-view?${params.toString()}`;
+}
+
 function pointDistance(aX: number, aY: number, bX: number, bY: number): number {
   const dx = aX - bX;
   const dy = aY - bY;
@@ -336,6 +343,8 @@ export default function TestRunnerPage({ params }: PageProps) {
   const [emailStatus, setEmailStatus] = useState<EmailStatus>("idle");
   const [usingDirectFallback, setUsingDirectFallback] = useState(false);
   const [telemetryMode, setTelemetryMode] = useState<"precise" | "estimated" | "none">("none");
+  const debugTelemetry =
+    searchParams.get("debugTelemetry") === "1" || process.env.NEXT_PUBLIC_DEBUG_TELEMETRY === "1";
 
   const participantName = searchParams.get("participant")?.trim() ?? "";
 
@@ -359,6 +368,8 @@ export default function TestRunnerPage({ params }: PageProps) {
   const telemetryHistoryRef = useRef<ScrollTelemetry[]>([]);
   const latestTelemetryRef = useRef<ScrollTelemetry | null>(null);
   const telemetryPollIdRef = useRef<number | null>(null);
+  const proxyRetryRef = useRef(0);
+  const lastProxyLogAtRef = useRef(0);
 
   const figmaSourceUrl = useMemo(() => {
     const targetUrlFromQuery = searchParams.get("targetUrl")?.trim();
@@ -373,17 +384,25 @@ export default function TestRunnerPage({ params }: PageProps) {
   const isFigmaTarget = useMemo(() => /https?:\/\/(www\.)?figma\.com\/proto\//i.test(figmaSourceUrl), [figmaSourceUrl]);
   const isUsingPlaceholderFigma = figmaEmbedUrl.includes("your-file-id");
   const [activeIframeUrl, setActiveIframeUrl] = useState<string>("");
+  const sourceModeLabel = useMemo(() => {
+    if (usingDirectFallback) {
+      return isFigmaTarget ? "figma-direct" : "website-direct";
+    }
+    return isFigmaTarget ? "figma-proxy" : "website-proxy";
+  }, [isFigmaTarget, usingDirectFallback]);
 
   useEffect(() => {
     if (isUsingPlaceholderFigma) {
       setActiveIframeUrl(figmaEmbedUrl);
       setUsingDirectFallback(false);
       setTelemetryMode("none");
+      proxyRetryRef.current = 0;
       return;
     }
-    setActiveIframeUrl(`/api/proxy-view?target=${encodeURIComponent(figmaSourceUrl)}`);
+    setActiveIframeUrl(makeProxyUrl(figmaSourceUrl));
     setUsingDirectFallback(false);
     setTelemetryMode("none");
+    proxyRetryRef.current = 0;
   }, [figmaEmbedUrl, figmaSourceUrl, isUsingPlaceholderFigma]);
 
   useEffect(() => {
@@ -1047,9 +1066,21 @@ export default function TestRunnerPage({ params }: PageProps) {
     }
     remapSamplesWithTelemetry(viewportWidth, viewportHeight);
 
+    if (debugTelemetry) {
+      // eslint-disable-next-line no-console
+      console.log("[eyetracker] heatmap gen", {
+        telemetrySamples: telemetryHistoryRef.current.length,
+        maxScrollY: maxProtoScrollYRef.current,
+        trackedDocHeight: maxProtoDocHeightRef.current,
+        reportSamples: reportSamplesRef.current.length,
+        sourceMode: sourceModeLabel,
+        targetType: isFigmaTarget ? "figma" : "website"
+      });
+    }
+
     if (getEffectiveTelemetryMode() === "none") {
       setWarning(
-        "No page scroll telemetry was captured during this run. Full-page heatmap coverage is limited for this session."
+        "No page scroll telemetry was captured during this run. Heatmap is viewport-only for this session."
       );
     }
 
@@ -1199,17 +1230,34 @@ export default function TestRunnerPage({ params }: PageProps) {
           docHeight: docHeight !== null ? Math.max(docHeight, scrollY + 1) : Math.max(maxProtoDocHeightRef.current, scrollY + 1),
           viewportHeight: viewportHeight !== null && viewportHeight > 0 ? viewportHeight : window.innerHeight
         });
+        if (debugTelemetry && Date.now() - lastProxyLogAtRef.current > 900) {
+          lastProxyLogAtRef.current = Date.now();
+          // eslint-disable-next-line no-console
+          console.log("[eyetracker] proxy_metrics", {
+            ts,
+            scrollY: Math.max(0, scrollY),
+            docHeight: docHeight !== null ? Math.max(docHeight, scrollY + 1) : Math.max(maxProtoDocHeightRef.current, scrollY + 1),
+            viewportHeight: viewportHeight !== null && viewportHeight > 0 ? viewportHeight : window.innerHeight,
+            telemetrySamples: telemetryHistoryRef.current.length
+          });
+        }
       }
     };
 
     const onProxyError = (event: MessageEvent) => {
       if (typeof event.data !== "object" || !event.data) return;
       if (event.data.type !== "proxy_error") return;
+      if (proxyRetryRef.current < 1) {
+        proxyRetryRef.current += 1;
+        setWarning("Proxy telemetry failed once. Retrying proxy mode before switching to direct mode...");
+        setActiveIframeUrl(makeProxyUrl(figmaSourceUrl, String(Date.now())));
+        return;
+      }
       setUsingDirectFallback(true);
       setTelemetryMode("estimated");
       setActiveIframeUrl(isFigmaTarget ? figmaEmbedUrl : figmaSourceUrl);
       setWarning(
-        "Proxy mode failed for this target. Switched to direct loading. Full-page heatmap may be approximate."
+        "Proxy mode failed for this target. Switched to direct loading. Full-page heatmap may be viewport-only."
       );
     };
 
@@ -1224,7 +1272,7 @@ export default function TestRunnerPage({ params }: PageProps) {
       window.removeEventListener("message", onProxyMetrics);
       window.removeEventListener("message", onProxyError);
     };
-  }, [currentScreenId, figmaEmbedUrl, figmaSourceUrl, isFigmaTarget, stage]);
+  }, [currentScreenId, debugTelemetry, figmaEmbedUrl, figmaSourceUrl, isFigmaTarget, stage]);
 
   useEffect(() => {
     return () => {
@@ -1258,12 +1306,15 @@ export default function TestRunnerPage({ params }: PageProps) {
         <span>Engine: {engineName ?? "not initialized"}</span>
         <span>Calibration score: {averageCalibrationScore !== null ? `${averageCalibrationScore}/100` : "pending"}</span>
         <span>Email report: {emailStatus}</span>
-        <span>Source mode: {usingDirectFallback ? "direct" : "proxy"}</span>
+        <span>Source mode: {sourceModeLabel}</span>
         <span>Telemetry: {telemetryMode}</span>
+        <span>Telemetry samples: {telemetryHistoryRef.current.length}</span>
       </section>
-      {isFigmaTarget && usingDirectFallback && (
+      {usingDirectFallback && (
         <p className="warning-banner">
-          Figma is running in direct mode (proxy failed), so full internal scroll telemetry is limited. Exported scroll heatmap is best-effort.
+          {isFigmaTarget
+            ? "Figma is running in direct mode (proxy failed), so internal scroll telemetry is limited. Exported heatmap may be viewport-only."
+            : "Website is running in direct mode (proxy failed), so internal scroll telemetry is limited. Exported heatmap may be viewport-only."}
         </p>
       )}
 
@@ -1323,6 +1374,12 @@ export default function TestRunnerPage({ params }: PageProps) {
           </p>
           <p>
             <strong>Telemetry mode:</strong> {sessionReport.telemetryMode}
+          </p>
+          <p>
+            <strong>Heatmap coverage:</strong>{" "}
+            {sessionReport.telemetryMode === "none"
+              ? "Viewport-only (scroll telemetry unavailable)"
+              : "Scroll-aware full-page mapping"}
           </p>
           <p>
             <strong>Tracked document height:</strong> {sessionReport.trackedDocHeight}px

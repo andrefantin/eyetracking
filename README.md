@@ -64,10 +64,12 @@ You can pass setup values directly in the URL:
 
 - `/test/<sessionToken>?participant=Participant%2001`
 - `/test/<sessionToken>?targetUrl=https%3A%2F%2Fwww.figma.com%2Fproto%2F...`
+- `/test/<sessionToken>?debugTelemetry=1` (prints proxy telemetry + heatmap generation diagnostics in browser console)
 - both can be combined.
 
 The app uses a same-origin proxy route (`/api/proxy-view`) for target URLs so scroll telemetry can be captured for full-page heatmaps.
-If proxy reports an explicit error, the UI falls back to direct mode; in direct mode, full-page scroll heatmaps are estimated from user input events.
+If proxy reports an explicit error, the UI retries proxy mode once and then falls back to direct mode.
+In direct mode, internal page scroll telemetry may be unavailable and heatmaps can become viewport-only.
 
 ## Notes
 

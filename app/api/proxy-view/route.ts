@@ -71,6 +71,42 @@ function injectTelemetry(html: string): string {
     };
   }
 
+  function readKnownContainerMetrics(winSpan) {
+    try {
+      var selectors = [
+        "[data-scroll-container]",
+        "[data-scrollable]",
+        "#root",
+        "#app",
+        "#__next",
+        "main",
+        ".scroll-container"
+      ];
+      var best = null;
+      for (var i = 0; i < selectors.length; i += 1) {
+        var el = document.querySelector(selectors[i]);
+        if (!el) continue;
+        var top = typeof el.scrollTop === "number" ? el.scrollTop : 0;
+        var height = typeof el.scrollHeight === "number" ? el.scrollHeight : 0;
+        var client = typeof el.clientHeight === "number" ? el.clientHeight : 0;
+        var span = height - client;
+        if (span <= 40) continue;
+        if (!best || span > best.span) {
+          best = {
+            scrollY: Math.max(0, top),
+            docHeight: Math.max(height, top + client),
+            viewportHeight: Math.max(1, client),
+            span: span
+          };
+        }
+      }
+      if (best && best.span >= winSpan) return best;
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function readEffectiveMetrics() {
     var win = readWindowMetrics();
     var activeSpan = Math.max(0, activeScroll.height - activeScroll.client);
@@ -84,6 +120,16 @@ function injectTelemetry(html: string): string {
         docHeight: Math.max(activeScroll.height, activeScroll.top + activeScroll.client),
         viewportHeight: Math.max(1, activeScroll.client),
         mode: "container"
+      };
+    }
+
+    var knownContainer = readKnownContainerMetrics(winSpan);
+    if (knownContainer) {
+      return {
+        scrollY: knownContainer.scrollY,
+        docHeight: knownContainer.docHeight,
+        viewportHeight: knownContainer.viewportHeight,
+        mode: "container-known"
       };
     }
 
