@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 
+const CHROME_LIKE_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+
 function isHttpUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -7,6 +10,15 @@ function isHttpUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function looksLikeHtml(contentType: string, body: string): boolean {
+  const normalized = contentType.toLowerCase();
+  if (normalized.includes("text/html") || normalized.includes("application/xhtml+xml")) {
+    return true;
+  }
+  const probe = body.slice(0, 2048).toLowerCase();
+  return probe.includes("<!doctype html") || probe.includes("<html");
 }
 
 function injectTelemetry(html: string): string {
@@ -258,6 +270,9 @@ function injectTelemetry(html: string): string {
 })();
 </script>`;
 
+  if (sanitizedHtml.includes("<head>")) {
+    return sanitizedHtml.replace("<head>", `<head>${telemetryScript}`);
+  }
   if (sanitizedHtml.includes("</body>")) {
     return sanitizedHtml.replace("</body>", `${telemetryScript}</body>`);
   }
@@ -296,40 +311,35 @@ export async function GET(request: Request) {
 
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
+    const timeout = setTimeout(() => controller.abort(), 20000);
 
     const response = await fetch(targetUrl.toString(), {
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; EyeTrackerProxy/1.0)",
-        Accept: "text/html,application/xhtml+xml"
+        "User-Agent": CHROME_LIKE_UA,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9"
       },
       redirect: "follow",
       signal: controller.signal
     });
     clearTimeout(timeout);
 
-    if (!response.ok) {
-      return new NextResponse(proxyErrorHtml(`Target fetch failed (${response.status})`), {
-        status: 502,
-        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
-      });
-    }
-
     const contentType = response.headers.get("content-type") || "";
-    if (!contentType.includes("text/html")) {
-      return new NextResponse(proxyErrorHtml("Target is not an HTML page"), {
+    const html = await response.text();
+    if (!looksLikeHtml(contentType, html)) {
+      return new NextResponse(proxyErrorHtml(`Target is not an HTML page (content-type: ${contentType || "unknown"})`), {
         status: 415,
         headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
       });
     }
 
-    const html = await response.text();
+    // Some websites return an HTML error page with non-2xx status. Keep proxy mode available in that case.
     const baseTag = `<base href="${targetUrl.toString()}">`;
     const withBase = html.includes("<head>") ? html.replace("<head>", `<head>${baseTag}`) : `${baseTag}${html}`;
     const withTelemetry = injectTelemetry(withBase);
 
     return new NextResponse(withTelemetry, {
-      status: 200,
+      status: response.ok ? 200 : response.status,
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store"

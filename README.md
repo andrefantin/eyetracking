@@ -68,7 +68,7 @@ You can pass setup values directly in the URL:
 - both can be combined.
 
 The app uses a same-origin proxy route (`/api/proxy-view`) for target URLs so scroll telemetry can be captured for full-page heatmaps.
-If proxy reports an explicit error, the UI retries proxy mode once and then falls back to direct mode.
+If proxy reports an explicit error, the UI retries proxy mode twice and then falls back to direct mode.
 In direct mode, internal page scroll telemetry may be unavailable and heatmaps can become viewport-only.
 
 ## Notes

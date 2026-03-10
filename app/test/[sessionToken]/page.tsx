@@ -68,6 +68,7 @@ const BATCH_INTERVAL_MS = 750;
 const BATCH_MAX_EVENTS = 50;
 const FIGMA_URL_PLACEHOLDER = "https://www.figma.com/proto/your-file-id/your-prototype";
 const CALIBRATION_MAX_RETRIES_PER_POINT = 2;
+const MAX_PROXY_RETRIES = 2;
 
 function makeProxyUrl(target: string, retryKey?: string): string {
   const params = new URLSearchParams();
@@ -1247,9 +1248,16 @@ export default function TestRunnerPage({ params }: PageProps) {
     const onProxyError = (event: MessageEvent) => {
       if (typeof event.data !== "object" || !event.data) return;
       if (event.data.type !== "proxy_error") return;
-      if (proxyRetryRef.current < 1) {
+      const reason = typeof event.data.message === "string" ? event.data.message : "Unknown proxy failure";
+      if (debugTelemetry) {
+        // eslint-disable-next-line no-console
+        console.warn("[eyetracker] proxy_error", { reason, retries: proxyRetryRef.current, target: figmaSourceUrl });
+      }
+      if (proxyRetryRef.current < MAX_PROXY_RETRIES) {
         proxyRetryRef.current += 1;
-        setWarning("Proxy telemetry failed once. Retrying proxy mode before switching to direct mode...");
+        setWarning(
+          `Proxy telemetry failed (${reason}). Retrying proxy mode (${proxyRetryRef.current}/${MAX_PROXY_RETRIES}) before switching to direct mode...`
+        );
         setActiveIframeUrl(makeProxyUrl(figmaSourceUrl, String(Date.now())));
         return;
       }
@@ -1257,7 +1265,7 @@ export default function TestRunnerPage({ params }: PageProps) {
       setTelemetryMode("estimated");
       setActiveIframeUrl(isFigmaTarget ? figmaEmbedUrl : figmaSourceUrl);
       setWarning(
-        "Proxy mode failed for this target. Switched to direct loading. Full-page heatmap may be viewport-only."
+        `Proxy mode failed (${reason}). Switched to direct loading. Full-page heatmap may be viewport-only.`
       );
     };
 
